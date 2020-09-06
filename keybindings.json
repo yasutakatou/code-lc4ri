@@ -1,0 +1,7 @@
+[
+	{
+		"key": "ctrl+shift+a",
+		"command": "extension.lc4ri",
+		"args": "code-lc4ri: LC4RI for VS Code"
+	}
+]
