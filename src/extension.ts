@@ -46,7 +46,6 @@ export function activate(context: vscode.ExtensionContext) {
 			const regB = /\{[1-9]\}/;
 			if (lines.search(regB) > -1) {			
 				lines = changeList(lines, numVar);
-				console.log(lines);
 			}
 
 			const regC = new RegExp(regTab(execCount));
@@ -55,10 +54,12 @@ export function activate(context: vscode.ExtensionContext) {
 	
 				try{
 					const stdout = execSync(lines.replace(regC, ""));
+					consoles += "\n[" + lines.replace(regC, "") +"]\n";
 					consoles += stdout.toString();
 					execCount++;
 				}
 				catch(err){
+					consoles += "\n[" + lines.replace(regC, "") +"]\n";
 					consoles += err.stderr.toString();
 					execCount = 0;
 				}
@@ -116,10 +117,12 @@ function doShell(execCount: number, strs: string, consoles: string) {
 	if (strs.search(regA) > -1) {
 		try{
 			const stdout = execSync(strs.replace(regA, ""));
+			consoles += "\n[" + strs.replace(regA, "") +"]\n"
 			consoles += stdout.toString();
 			execCount++;
 		}
 		catch(err){
+			consoles += "\n[" + strs.replace(regA, "") +"]\n"
 			consoles += err.stderr.toString();
 			execCount = 0;
 		}
@@ -168,7 +171,7 @@ function changeList(strs: string, numVar: { [key: string]: string; }) {
 function numberListCheck(strs: string, numVar: { [key: string]: string; }) {
 	const nums = strs.split(/. /);
 	try{
-		const stdout = execSync(nums[1]);
+		const stdout = execSync(strs.replace(nums[0]+".", ""));
 		numVar[nums[0]] = stdout.toString();
 		numVar[nums[0]] = numVar[nums[0]].replace(/\r\n|\r|\n/, "");
 	}
