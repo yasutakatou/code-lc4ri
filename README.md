@@ -52,7 +52,8 @@ set **keybindings.json**, enable it's shortcut do.
 
 ## formats
 
-[Basic. You can write markdown usually](https://www.markdownguide.org/basic-syntax/), but it's can run following.
+[Basic. You can write markdown usually](https://www.markdownguide.org/basic-syntax/), but it's can run following.<br>
+run this extension, line search, if match rule line, run commands. **start line is editor's cursor position**.
 
 ### list format
 
