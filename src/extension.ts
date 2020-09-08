@@ -2,6 +2,7 @@
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 const { execSync } = require('child_process');
+const encoding = require('encoding-japanese');
 
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
@@ -51,16 +52,15 @@ export function activate(context: vscode.ExtensionContext) {
 			const regC = new RegExp(regTab(execCount));
 			if (lines.search(regC) > -1) {
 				execFlag = true;
+				consoles += "\n[" + lines.replace(regC, "") +"]\n";
 	
 				try{
 					const stdout = execSync(lines.replace(regC, ""));
-					consoles += "\n[" + lines.replace(regC, "") +"]\n";
-					consoles += stdout.toString();
+					consoles += convToUTF(stdout);
 					execCount++;
 				}
 				catch(err){
-					consoles += "\n[" + lines.replace(regC, "") +"]\n";
-					consoles += err.stderr.toString();
+					consoles += convToUTF(err.stderr);
 					execCount = 0;
 				}
 			} else {
@@ -115,15 +115,15 @@ export function activate(context: vscode.ExtensionContext) {
 function doShell(execCount: number, strs: string, consoles: string) {
 	const regA = new RegExp(regTab(execCount));
 	if (strs.search(regA) > -1) {
+		consoles += "\n[" + strs.replace(regA, "") +"]\n"
+
 		try{
 			const stdout = execSync(strs.replace(regA, ""));
-			consoles += "\n[" + strs.replace(regA, "") +"]\n"
-			consoles += stdout.toString();
+			consoles += convToUTF(stdout.toString());
 			execCount++;
 		}
 		catch(err){
-			consoles += "\n[" + strs.replace(regA, "") +"]\n"
-			consoles += err.stderr.toString();
+			consoles += convToUTF(err.stderr.toString());
 			execCount = 0;
 		}
 	}
@@ -172,11 +172,22 @@ function numberListCheck(strs: string, numVar: { [key: string]: string; }) {
 	const nums = strs.split(/. /);
 	try{
 		const stdout = execSync(strs.replace(nums[0]+".", ""));
-		numVar[nums[0]] = stdout.toString();
+		numVar[nums[0]] = convToUTF(stdout.toString());
 		numVar[nums[0]] = numVar[nums[0]].replace(/\r\n|\r|\n/, "");
 	}
 	catch(err){
-		numVar[nums[0]] = err.stderr.toString();
+		numVar[nums[0]] = convToUTF(err.stderr.toString());
 	}
 	return numVar;
+}
+
+function convToUTF(strs: string) {
+	if (encoding.detect(strs) === 'SJIS') {
+		let stra = encoding.convert(strs, {
+			to: 'UNICODE', // to_encoding
+			from: 'AUTO' // from_encoding
+		});
+		return encoding.codeToString(stra);
+	}
+	return strs.toString();
 }

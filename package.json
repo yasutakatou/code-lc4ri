@@ -2,7 +2,7 @@
 	"name": "code-lc4ri",
 	"displayName": "code-lc4ri",
 	"description": "LC4RI for VS Code",
-	"version": "0.0.1",
+	"version": "0.2.0",
 	"publisher": "yasutakatou",
 	"repository": "https://github.com/yasutakatou/code-lc4ri",
 	"engines": {
@@ -36,5 +36,10 @@
 		"@typescript-eslint/parser": "^3.0.2",
 		"eslint": "^7.1.0",
 		"typescript": "^3.9.4"
+	},
+	"dependencies": {
+		"encoding-japanese": "^1.0.30",
+		"iconv": "^3.0.0",
+		"jschardet": "^2.2.1"
 	}
 }
