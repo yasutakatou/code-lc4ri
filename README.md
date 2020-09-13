@@ -2,7 +2,7 @@
 
 **code-lc4ri: Markdown + LC4RI for VS Code**
 
-![lc4ri](https://github.com/yasutakatou/code-lc4ri/blob/pic/lc4ri2.gif)
+![lc4ri](https://github.com/yasutakatou/code-lc4ri/raw/pic/lc4ri2.gif)
 
 # solution
 
@@ -63,7 +63,7 @@ run this extension, line search, if match rule line, run commands. **start line 
 - ls
 ```
 
-![1](https://github.com/yasutakatou/code-lc4ri/blob/pic/1.png)
+![1](https://github.com/yasutakatou/code-lc4ri/raw/pic/1.png)
 
 note) If not exists code section after list, will **create code section and output to it**.<br>
 note) **Tab indents** means, If command success is **next indent run. (AND rule)**<br>
@@ -87,9 +87,9 @@ If you write horizon line, **split commands**.
 - uname
 ````
 
-![2](https://github.com/yasutakatou/code-lc4ri/blob/pic/2.png)
+![2](https://github.com/yasutakatou/code-lc4ri/raw/pic/2.png)
 
-![3](https://github.com/yasutakatou/code-lc4ri/blob/pic/3.png)
+![3](https://github.com/yasutakatou/code-lc4ri/raw/pic/3.png)
 
 note) In this case, run command to the horizon line.
 
@@ -109,9 +109,102 @@ create variable **{1}**.
 
 variable **{1}** output.
 
-![4](https://github.com/yasutakatou/code-lc4ri/blob/pic/4.png)
+![4](https://github.com/yasutakatou/code-lc4ri/raw/pic/4.png)
 
 note) variable can use **1-9 integer**.
+
+/home/pi/code-lc4ri/code-lc4ri-0.5.0.vsix
+
+# v0.5: "config file" support!
+
+This extension easier use, support config file.
+
+# sample setting
+
+json format.
+
+```
+{
+  "timeout": 10000,
+  "template": {
+    "linux": "ssh user@192.168.0.1 {COMMAND}"
+  },
+  "changeWord": {
+    "#HOME#": "/home/user"
+  }
+}
+```
+
+## file create
+
+**If does not exist, it will be created** in the following folder.
+
+- Windows
+	- %USERPROFILE%/.code-lc4ri/config.json
+		- ex) C:\Users\(USER NAME)\.code-lc4ri\config.json
+- Other OS
+	- $HOME/.code-lc4ri/config.json
+		- ex) /home/user/.code-lc4ri/config.json
+
+## file load
+
+When **VSCode run**, loading config.
+
+## options
+
+options detail following.
+
+### timeout
+
+This option is the **timeout time** when the command is executed.<br>
+Units are in **milliseconds**.
+
+10000 -> 10 seconds.
+
+### template
+
+This option is **default commands template**, and can be defined on a per-OS.<br>
+For example, you want to execute every commands on SSH destination.<br>
+In case of can set this option.<br>
+
+```
+	"OS type":"template"
+```
+
+"OS Type" is following.<br>
+
+[process.platform](https://nodejs.org/api/process.html#process_process_platform)
+
+**{COMMAND}** included the original commands.
+
+```
+	"linux": "ssh user@192.168.0.1 {COMMAND}"
+```
+
+- normal
+	- \- ls
+- define
+	- ssh user@192.168.0.1 "{COMMAND}"
+- execute commands
+	- ssh user@192.168.0.1 ls
+
+### chageWord
+
+This option is **convert keywords list**.<br>
+If server address changes often, If you don't want to use commands that are dangerous to execute.<br>
+In case of can set this option.<br>
+Defines a set of words before and after conversion.<br>
+
+```
+	"pre word": "after word"
+```
+
+- normal
+	- \- ls #HOME#
+- define
+	- "#HOME#": "/home/user"
+- execute commands
+	- ls /home/user
 
 # LICENSE
 
