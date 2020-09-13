@@ -27,6 +27,8 @@ This extention, usually write markdown document. and additional commands can be 
 
 # installation
 
+[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=yasutakatou.code-lc4ri)
+
 [download vsix from release page](https://github.com/yasutakatou/code-lc4ri/releases).<br>
 save vsix file, [install how to](https://code.visualstudio.com/docs/editor/extension-gallery#_install-from-a-vsix).<br>
 
