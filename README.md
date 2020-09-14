@@ -1,10 +1,24 @@
 # code-lc4ri
 
+<!-- # Short Description -->
+
 **code-lc4ri: Markdown + LC4RI for VS Code**
 
-![lc4ri](https://github.com/yasutakatou/code-lc4ri/raw/pic/lc4ri2.gif)
+<!-- # Badges -->
 
-# solution
+[![Github issues](https://img.shields.io/github/issues/yasutakatou/code-lc4ri)](https://github.com/yasutakatou/code-lc4ri/issues)
+[![Github forks](https://img.shields.io/github/forks/yasutakatou/code-lc4ri)](https://github.com/yasutakatou/code-lc4ri/network/members)
+[![Github stars](https://img.shields.io/github/stars/yasutakatou/code-lc4ri)](https://github.com/yasutakatou/code-lc4ri/stargazers)
+[![Github top language](https://img.shields.io/github/languages/top/yasutakatou/code-lc4ri)](https://github.com/yasutakatou/code-lc4ri/)
+[![Github license](https://img.shields.io/github/license/yasutakatou/code-lc4ri)](https://github.com/yasutakatou/code-lc4ri/)
+
+# Tags
+
+`vscode` `vscode-extension` `typescript` `nodejs` `lc4ri` `markdown`
+
+# Demo
+
+![lc4ri](https://github.com/yasutakatou/code-lc4ri/raw/pic/lc4ri2.gif)
 
 Do you often use "**jupyter notebook**" when choosing a documentation tool for your operations manual?<br>
 But, this include problems<br>
@@ -16,7 +30,7 @@ But, this include problems<br>
 jupyter is very excellent tool, but I know more usefull for text edit. **it's VSCode!**<br>
 My idea is, **Markdown + LC4RI on VSCode's ecosystem** is more better solution!<br>
 
-# features
+# Advantages
 
 This extention, usually write markdown document. and additional commands can be executed.
 
@@ -25,7 +39,7 @@ This extention, usually write markdown document. and additional commands can be 
 - **command output to auto apply to document**.
 - **can use variable**.
 
-# installation
+# Installation
 
 [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=yasutakatou.code-lc4ri)
 
@@ -211,3 +225,9 @@ Defines a set of words before and after conversion.<br>
 # LICENSE
 
 MIT License
+
+# Contributors
+
+- [yasutakatou](https://github.com/yasutakatou)
+
+<!-- CREATED_BY_LEADYOU_README_GENERATOR -->
