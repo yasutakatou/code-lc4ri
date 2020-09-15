@@ -1,3 +1,4 @@
+"use strict";
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
@@ -5,6 +6,8 @@ import { execSync } from 'child_process';
 import * as Encoding from 'encoding-japanese';
 import * as fs from 'fs';
 import { format } from 'path';
+import { getDefaultSettings } from 'http2';
+require('date-utils');
 
 let config: any;
 
@@ -62,7 +65,7 @@ export function activate(context: vscode.ExtensionContext) {
 			const regC = new RegExp(regTab(execCount));
 			if (lines.search(regC) > -1) {
 				execFlag = true;
-				consoles += "\n[" + tempConv(lines.replace(regC, "")) +"]\n";
+				consoles += "\n[ " + tempConv(lines.replace(regC, "")) +" ] " + getDate() + "\n";
 	
 				try{
 					const stdout = execSync(tempConv(lines.replace(regC, "")), {timeout: config.timeout});
@@ -125,7 +128,7 @@ export function activate(context: vscode.ExtensionContext) {
 function doShell(execCount: number, strs: string, consoles: string) {
 	const regA = new RegExp(regTab(execCount));
 	if (strs.search(regA) > -1) {
-		consoles += "\n[" + tempConv(strs.replace(regA, "")) +"]\n";
+		consoles += "\n[ " + tempConv(strs.replace(regA, "")) +" ] " + getDate()+"\n";
 
 		try{
 			const stdout = execSync(tempConv(strs.replace(regA, "")), {timeout: config.timeout});
@@ -176,6 +179,10 @@ function horizonCheck(strs: string) {
 function changeList(strs: string, numVar: { [key: string]: string; }) {
 	const nums = strs.split(/{/)[1].split(/}/)[0];
 	return strs.replace("{" + nums + "}", numVar[nums].toString());
+}
+
+function getDate() {
+	return new Date(Date.now()).toString();
 }
 
 function tempConv(strs: string) {

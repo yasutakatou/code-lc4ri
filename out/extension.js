@@ -7,6 +7,7 @@ const vscode = require("vscode");
 const child_process_1 = require("child_process");
 const Encoding = require("encoding-japanese");
 const fs = require("fs");
+require('date-utils');
 let config;
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
@@ -52,7 +53,7 @@ function activate(context) {
             const regC = new RegExp(regTab(execCount));
             if (lines.search(regC) > -1) {
                 execFlag = true;
-                consoles += "\n[" + tempConv(lines.replace(regC, "")) + "]\n";
+                consoles += "\n[ " + tempConv(lines.replace(regC, "")) + " ] " + getDate() + "\n";
                 try {
                     const stdout = child_process_1.execSync(tempConv(lines.replace(regC, "")), { timeout: config.timeout });
                     consoles += convToUTF(stdout);
@@ -112,7 +113,7 @@ exports.activate = activate;
 function doShell(execCount, strs, consoles) {
     const regA = new RegExp(regTab(execCount));
     if (strs.search(regA) > -1) {
-        consoles += "\n[" + tempConv(strs.replace(regA, "")) + "]\n";
+        consoles += "\n[ " + tempConv(strs.replace(regA, "")) + " ] " + getDate() + "\n";
         try {
             const stdout = child_process_1.execSync(tempConv(strs.replace(regA, "")), { timeout: config.timeout });
             consoles += convToUTF(stdout);
@@ -155,6 +156,9 @@ function horizonCheck(strs) {
 function changeList(strs, numVar) {
     const nums = strs.split(/{/)[1].split(/}/)[0];
     return strs.replace("{" + nums + "}", numVar[nums].toString());
+}
+function getDate() {
+    return new Date(Date.now()).toString();
 }
 function tempConv(strs) {
     Object.keys(config['template']).forEach(function (k) {

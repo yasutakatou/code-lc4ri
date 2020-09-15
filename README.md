@@ -222,6 +222,14 @@ Defines a set of words before and after conversion.<br>
 - execute commands
 	- ls /home/user
 
+# v0.6: executed time auto print.
+
+![5](https://github.com/yasutakatou/code-lc4ri/raw/pic/5.png)
+
+It can be used as evidence of execution time.
+
+<br>
+
 # LICENSE
 
 MIT License
