@@ -68,8 +68,23 @@ export function activate(context: vscode.ExtensionContext) {
 				consoles += "\n[ " + tempConv(lines.replace(regC, "")) +" ] " + getDate() + "\n";
 	
 				try{
-					const stdout = execSync(tempConv(lines.replace(regC, "")), {timeout: config.timeout});
-					consoles += convToUTF(stdout);
+					const regF = /! .*/;
+					if (lines.search(regF) > -1) {
+						const filename = text.split("! ");
+						const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
+						vscode.window.activeTerminal?.sendText("echo " +fileUri);
+						vscode.workspace.openTextDocument(fileUri).then(doc => {
+							vscode.window.showTextDocument(doc);
+						});
+					} else {
+						if (config['toterminal']===true) {
+							vscode.window.activeTerminal?.sendText(tempConv(lines.replace(regC, "")));
+						} else {
+							const stdout = execSync(tempConv(lines.replace(regC, "")), {timeout: config.timeout});
+							let result = stdout.toString();
+							consoles += convToUTF(result);		
+						}
+					}
 					execCount++;
 				}
 				catch(err){
@@ -81,7 +96,22 @@ export function activate(context: vscode.ExtensionContext) {
 				const regD = new RegExp(regTab(execCount));
 				if (lines.search(regD) > -1) {
 					execFlag = true;
-					consoles = doShell(execCount, lines, consoles);
+
+					const regF = /! .*/;
+					if (lines.search(regF) > -1) {
+						const filename = text.split("! ");
+						const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
+						vscode.window.activeTerminal?.sendText("echo " +fileUri);
+						vscode.workspace.openTextDocument(fileUri).then(doc => {
+							vscode.window.showTextDocument(doc);
+						});
+					} else {
+						if (config['toterminal']===true) {
+							vscode.window.activeTerminal?.sendText(lines);
+						} else {
+							consoles = doShell(execCount, lines, consoles);
+						}
+					}
 				}
 			}
 
@@ -132,7 +162,8 @@ function doShell(execCount: number, strs: string, consoles: string) {
 
 		try{
 			const stdout = execSync(tempConv(strs.replace(regA, "")), {timeout: config.timeout});
-			consoles += convToUTF(stdout);
+			let result = stdout.toString();
+			consoles += convToUTF(result);
 			execCount++;
 		}
 		catch(err){
@@ -207,7 +238,8 @@ function numberListCheck(strs: string, numVar: { [key: string]: string; }) {
 	const nums = strs.split(/. /);
 	try{
 		const stdout = execSync(tempConv(strs.replace(nums[0]+".", "")), {timeout: config.timeout});
-		numVar[nums[0]] = convToUTF(stdout);
+		let result = stdout.toString();
+		numVar[nums[0]] = convToUTF(result);
 		numVar[nums[0]] = numVar[nums[0]].replace(/\r\n|\r|\n/, "");
 	}
 	catch(err){
@@ -216,17 +248,16 @@ function numberListCheck(strs: string, numVar: { [key: string]: string; }) {
 	return numVar;
 }
 
-function convToUTF(strs: Buffer) {
-	let result = strs.toString();
-	if (Encoding.detect(strs) === 'SJIS') {
-		const stra = Encoding.convert(strs, {
-			to: 'UNICODE', // to_encoding
-			from: 'AUTO', // from_encoding
-			type: 'string'
-		});
-		result = stra.toString();
+function convToUTF(strs: string) {
+	if (config['toutf8']===false) {
+		return strs.toString();
 	}
-	return result;
+	const stra = Encoding.convert(strs, {
+		from: 'SJIS', // from_encoding
+		to: 'UNICODE', // to_encoding
+		type: 'string'
+	});
+	return stra.toString();
 }
 
 function getHome() {
@@ -240,7 +271,8 @@ function getHome() {
 
 	try{
 		const stdout = execSync(com);
-		result = convToUTF(stdout).replace(/\r\n|\r|\n/, "");
+		result = stdout.toString();
+		result = result.replace(/\r\n|\r|\n/, "");
 	}
 	catch(err){
 		result = "";
@@ -251,26 +283,36 @@ function getHome() {
 function loadConfig() {
 	const homePath = getHome();
 	if (homePath === "") {
-		vscode.window.showInformationMessage("can't get config directory!");
+		vscode.window.showInformationMessage("can't get config directory!: " + homePath);
 		return;
 	}
 
-	if (fs.existsSync(homePath + "/.code-lc4ri") === false) {
-		fs.mkdir(homePath + "/.code-lc4ri", (err) => {
+	let configDir = homePath + "/.code-lc4ri"
+
+	if (process.platform==='win32') {
+		configDir = homePath + "\\.code-lc4ri"
+	}
+
+	if (fs.existsSync(configDir) === false) {
+		fs.mkdir(configDir, (err) => {
 			if (err) {
-				vscode.window.showInformationMessage("can't create config directory!");
+				vscode.window.showInformationMessage("can't create config directory!: " + configDir);
 				return;		
 			}
 		});
 	}
-	
-	const configPath = homePath + "/.code-lc4ri/config.json";
+
+	let configPath = homePath + "/.code-lc4ri/config.json";
+
+	if (process.platform==='win32') {
+		configPath = homePath + "\\.code-lc4ri\\config.json";
+	}
 
 	if (fs.existsSync(configPath) === true) {
 		const rawdata = fs.readFileSync(configPath, "utf8");
 		config = JSON.parse(rawdata);
 	} else {
-		const tmpConfig = '{ "timeout": 10000, "template": {  },  "changeWord": {  } }';
+		const tmpConfig = '{ "timeout": 10000, "template": { }, "changeWord": { }, "toutf8": true, "toterminal": false }';
 		config = JSON.parse(tmpConfig);
 		fs.writeFile(configPath, JSON.stringify(config), (err) =>{
 			console.log(err);
