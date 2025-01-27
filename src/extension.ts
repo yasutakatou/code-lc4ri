@@ -72,7 +72,6 @@ export function activate(context: vscode.ExtensionContext) {
 					if (lines.search(regF) > -1) {
 						const filename = text.split("! ");
 						const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
-						vscode.window.activeTerminal?.sendText("echo " +fileUri);
 						vscode.workspace.openTextDocument(fileUri).then(doc => {
 							vscode.window.showTextDocument(doc);
 						});
@@ -101,7 +100,6 @@ export function activate(context: vscode.ExtensionContext) {
 					if (lines.search(regF) > -1) {
 						const filename = text.split("! ");
 						const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
-						vscode.window.activeTerminal?.sendText("echo " +fileUri);
 						vscode.workspace.openTextDocument(fileUri).then(doc => {
 							vscode.window.showTextDocument(doc);
 						});

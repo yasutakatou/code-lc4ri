@@ -13,7 +13,7 @@ let config;
 // your extension is activated the very first time the command is executed
 function activate(context) {
     const disposable = vscode.commands.registerCommand('extension.lc4ri', () => {
-        var _a, _b, _c, _d;
+        var _a, _b;
         if (config == null) {
             loadConfig();
         }
@@ -60,14 +60,13 @@ function activate(context) {
                     if (lines.search(regF) > -1) {
                         const filename = text.split("! ");
                         const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
-                        (_a = vscode.window.activeTerminal) === null || _a === void 0 ? void 0 : _a.sendText("echo " + fileUri);
                         vscode.workspace.openTextDocument(fileUri).then(doc => {
                             vscode.window.showTextDocument(doc);
                         });
                     }
                     else {
                         if (config['toterminal'] === true) {
-                            (_b = vscode.window.activeTerminal) === null || _b === void 0 ? void 0 : _b.sendText(tempConv(lines.replace(regC, "")));
+                            (_a = vscode.window.activeTerminal) === null || _a === void 0 ? void 0 : _a.sendText(tempConv(lines.replace(regC, "")));
                         }
                         else {
                             const stdout = child_process_1.execSync(tempConv(lines.replace(regC, "")), { timeout: config.timeout });
@@ -91,14 +90,13 @@ function activate(context) {
                     if (lines.search(regF) > -1) {
                         const filename = text.split("! ");
                         const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
-                        (_c = vscode.window.activeTerminal) === null || _c === void 0 ? void 0 : _c.sendText("echo " + fileUri);
                         vscode.workspace.openTextDocument(fileUri).then(doc => {
                             vscode.window.showTextDocument(doc);
                         });
                     }
                     else {
                         if (config['toterminal'] === true) {
-                            (_d = vscode.window.activeTerminal) === null || _d === void 0 ? void 0 : _d.sendText(lines);
+                            (_b = vscode.window.activeTerminal) === null || _b === void 0 ? void 0 : _b.sendText(lines);
                         }
                         else {
                             consoles = doShell(execCount, lines, consoles);
