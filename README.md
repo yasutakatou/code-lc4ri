@@ -147,7 +147,9 @@ json format.
   },
   "changeWord": {
     "#HOME#": "/home/user"
-  }
+  },
+  "toutf8": true,
+  "toterminal": true
 }
 ```
 
@@ -221,6 +223,14 @@ Defines a set of words before and after conversion.<br>
 	- "#HOME#": "/home/user"
 - execute commands
 	- ls /home/user
+
+### toutf8 (v0.91-)
+
+If set to **false**, force UTF-8 conversion process to be skipped (default is **true**)
+However, it is not working properly on my Windows...
+
+### toterminal (v0.91-)
+
 
 # v0.6: executed time auto print.
 
