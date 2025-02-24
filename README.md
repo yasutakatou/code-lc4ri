@@ -226,11 +226,14 @@ Defines a set of words before and after conversion.<br>
 
 ### toutf8 (v0.91-)
 
-If set to **false**, force UTF-8 conversion process to be skipped (default is **true**)
+If set to **false**, force UTF-8 conversion process to be skipped (default is **true**)<br>
 However, it is not working properly on my Windows...
 
 ### toterminal (v0.91-)
 
+If true, the command execution results are not returned to the markdown, but are **executed directly on the open terminal**.<br>
+
+![image](https://github.com/user-attachments/assets/82413d23-a4eb-48c1-bd89-3b9b2362c300)
 
 # v0.6: executed time auto print.
 
