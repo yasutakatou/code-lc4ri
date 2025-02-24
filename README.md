@@ -129,7 +129,15 @@ variable **{1}** output.
 
 note) variable can use **1-9 integer**.
 
-/home/pi/code-lc4ri/code-lc4ri-0.5.0.vsix
+### file open (v0.91-)
+
+To the top "!" at the beginning opens the specified file in a new tab
+
+```
+- ! \code.txt
+```
+
+![image](https://github.com/user-attachments/assets/b30a49ea-4df4-4d20-a2eb-d0f0fb0f90a0)
 
 # v0.5: "config file" support!
 
