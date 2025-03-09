@@ -58,8 +58,12 @@ function activate(context) {
                 try {
                     const regF = /! .*/;
                     if (lines.search(regF) > -1) {
-                        const filename = text.split("! ");
-                        const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
+                        const tmpfilename = text.split("! ");
+                        const filename = tmpfilename[1].split("\r\n");
+                        let fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + "/" + filename[0]);
+                        if (process.platform === 'win32') {
+                            fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + "\\" + filename[0]);
+                        }
                         vscode.workspace.openTextDocument(fileUri).then(doc => {
                             vscode.window.showTextDocument(doc);
                         });
@@ -88,8 +92,12 @@ function activate(context) {
                     execFlag = true;
                     const regF = /! .*/;
                     if (lines.search(regF) > -1) {
-                        const filename = text.split("! ");
-                        const fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + filename[1].replace(/\r\n|\r|\n/, ""));
+                        const tmpfilename = text.split("! ");
+                        const filename = tmpfilename[1].split("\r\n");
+                        let fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + "/" + filename[0]);
+                        if (process.platform === 'win32') {
+                            fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders[0].uri.fsPath + "\\" + filename[0]);
+                        }
                         vscode.workspace.openTextDocument(fileUri).then(doc => {
                             vscode.window.showTextDocument(doc);
                         });

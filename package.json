@@ -2,7 +2,7 @@
 	"name": "code-lc4ri",
 	"displayName": "code-lc4ri",
 	"description": "LC4RI for VS Code",
-	"version": "0.9.1",
+	"version": "0.9.2",
 	"publisher": "yasutakatou",
 	"repository": "https://github.com/yasutakatou/code-lc4ri",
 	"engines": {
