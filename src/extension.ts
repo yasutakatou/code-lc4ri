@@ -1,327 +1,1617 @@
 "use strict";
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
+// =============================================================================
+// code-lc4ri — Markdown + LC4RI for VS Code
+// -----------------------------------------------------------------------------
+// v1.0: large refactor.
+//   1. Async execution + progress + cancel (replaces execSync).
+//   2. CodeLens "Run" / "Dry-run" on every executable list line.
+//   3. settings.json (VS Code configuration) with backward-compat for the
+//      legacy ~/.code-lc4ri/config.json file.
+//   4. Workspace-Trust aware + dangerous-command guard / allow / deny lists.
+//   5. Named variables, {$PREV} / {$STATUS} / {$DATE}, "→ {name}" binding,
+//      `- assert: ...` directives.
+//   6. Status bar profile switcher (extends the OS-keyed `template`).
+//   7. Pure helpers are `export`ed so they can be unit-tested.
+//   8. HTML/Markdown report export, plus a minimal CLI entry point
+//      (bin/code-lc4ri) that reuses the same parser.
+// =============================================================================
+
 import * as vscode from 'vscode';
-import { execSync } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import * as Encoding from 'encoding-japanese';
 import * as fs from 'fs';
-import { format } from 'path';
-import { getDefaultSettings } from 'http2';
-require('date-utils');
+import * as path from 'path';
+import * as os from 'os';
 
-let config: any;
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
 
-// this method is called when your extension is activated
-// your extension is activated the very first time the command is executed
+export interface LC4RIConfig {
+    timeout: number;
+    /** Legacy per-OS template, kept for backward compatibility. */
+    template: { [k: string]: string };
+    /** Named profiles, e.g. {"prod-ssh": "ssh ops@prod {COMMAND}"} */
+    profiles: { [k: string]: string };
+    changeWord: { [k: string]: string };
+    toutf8: boolean;
+    toterminal: boolean;
+    outputFormat: 'codeblock' | 'collapsible';
+    dangerousPatterns: string[];
+    allowList: string[];
+    denyList: string[];
+    confirmDangerous: boolean;
+    showCodeLens: boolean;
+    shell: string | null;
+}
+
+export interface ExecResult {
+    stdout: string;
+    stderr: string;
+    code: number;
+    timedOut: boolean;
+    cancelled: boolean;
+}
+
+export interface Variables {
+    num: { [k: string]: string };
+    named: { [k: string]: string };
+    prev: string;
+    status: number;
+}
+
+interface ReportEntry {
+    command: string;
+    rendered: string;
+    output: string;
+    code: number;
+    ts: string;
+    ok: boolean;
+}
+
+// -----------------------------------------------------------------------------
+// Module-level state
+// -----------------------------------------------------------------------------
+
+let outputChannel: vscode.OutputChannel | undefined;
+let statusBarItem: vscode.StatusBarItem | undefined;
+let activeProfile: string = '';            // empty string ⇒ legacy `template` is used
+const runningProcs = new Set<ChildProcess>();
+const reportEntries: ReportEntry[] = [];
+let codeLensEmitter: vscode.EventEmitter<void> | undefined;
+/**
+ * Tracked current working directory across command executions.
+ * `undefined` means "not yet initialised"; will be set on first run to the
+ * workspace folder (or process.cwd() as a fallback).  Each subsequent `cd`
+ * command updates this value so the next command starts from the same place.
+ */
+let currentCwd: string | undefined = undefined;
+
+// -----------------------------------------------------------------------------
+// Defaults
+// -----------------------------------------------------------------------------
+
+export const DEFAULT_DANGEROUS_PATTERNS: string[] = [
+    '\\brm\\s+-rf?\\s+/',
+    '\\bdd\\s+if=',
+    '\\bmkfs\\.',
+    '\\bshutdown\\b',
+    '\\breboot\\b',
+    ':\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:',            // fork bomb
+    'curl\\s+[^|]+\\|\\s*(?:sh|bash)',
+    'wget\\s+[^|]+\\|\\s*(?:sh|bash)',
+    '>\\s*/dev/sd[a-z]'
+];
+
+const DEFAULT_CONFIG: LC4RIConfig = {
+    timeout: 10000,
+    template: {},
+    profiles: {},
+    changeWord: {},
+    toutf8: true,
+    toterminal: false,
+    outputFormat: 'codeblock',
+    dangerousPatterns: DEFAULT_DANGEROUS_PATTERNS,
+    allowList: [],
+    denyList: [],
+    confirmDangerous: true,
+    showCodeLens: true,
+    shell: null
+};
+
+// =============================================================================
+// Activate / Deactivate
+// =============================================================================
+
 export function activate(context: vscode.ExtensionContext) {
-	const disposable = vscode.commands.registerCommand('extension.lc4ri', () => {
-		if (config == null) {
-			loadConfig();
-		}
+    outputChannel = vscode.window.createOutputChannel('code-lc4ri');
+    outputChannel.appendLine(`[lc4ri] activated at ${new Date().toISOString()}`);
 
-		const editor = vscode.window.activeTextEditor;
-		if(editor == null){
-			throw new Error();
-		}
-		const position = editor.selection.active;
+    // ---------- Status bar profile picker --------------------------------
+    statusBarItem = vscode.window.createStatusBarItem(
+        vscode.StatusBarAlignment.Right,
+        100
+    );
+    statusBarItem.command = 'extension.lc4ri.switchProfile';
+    statusBarItem.tooltip = 'code-lc4ri: switch execution profile';
+    updateStatusBar();
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
 
-		const doc = editor.document;
-		let startPos = new vscode.Position(position.line, 0);
-		let endPos = new vscode.Position(doc.lineCount - 1, 10000);
-		let cur_selection = new vscode.Selection(startPos, endPos);
-		const text = doc.getText(cur_selection);
+    // ---------- CodeLens --------------------------------------------------
+    codeLensEmitter = new vscode.EventEmitter<void>();
+    const codeLensProvider = new LC4RICodeLensProvider(codeLensEmitter.event);
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(
+            { language: 'markdown', scheme: 'file' },
+            codeLensProvider
+        ),
+        vscode.languages.registerCodeLensProvider(
+            { language: 'markdown', scheme: 'untitled' },
+            codeLensProvider
+        )
+    );
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('lc4ri')) {
+                codeLensEmitter?.fire();
+                updateStatusBar();
+            }
+        })
+    );
 
-		let nowLine = position.line;
-		let startLine = 0;
-		let endLine = 0;
-		const texts = text.split(/\r\n|\r|\n/);
+    // ---------- Commands --------------------------------------------------
+    context.subscriptions.push(
+        vscode.commands.registerCommand('extension.lc4ri',
+            (_arg?: unknown) => runFromCursor({ dryRun: false })),
+        vscode.commands.registerCommand('extension.lc4ri.dryRun',
+            () => runFromCursor({ dryRun: true })),
+        vscode.commands.registerCommand('extension.lc4ri.runLine',
+            (uri: vscode.Uri, line: number, dryRun?: boolean) =>
+                runSingleLine(uri, line, dryRun === true)),
+        vscode.commands.registerCommand('extension.lc4ri.cancel', cancelAll),
+        vscode.commands.registerCommand('extension.lc4ri.switchProfile', switchProfile),
+        vscode.commands.registerCommand('extension.lc4ri.clearOutput', clearOutputBlock),
+        vscode.commands.registerCommand('extension.lc4ri.exportReport', exportReport),
+        vscode.commands.registerCommand('extension.lc4ri.exportReportMd', () => exportReport('md')),
+        vscode.commands.registerCommand('extension.lc4ri.exportReportHtml', () => exportReport('html'))
+    );
 
-		let consoles = "";
-		let execFlag = false;
-		let execCount = 0;
-		let horizonFlag = -1;
-		let numVar: { [key: string]: string; } = {};
-
-		for( let i = 0; i < texts.length; i++) {
-			let lines = texts[i];
-
-			if (horizonCheck(lines) == true) {
-				horizonFlag = nowLine;
-				break;
-			}
-
-			const regA = /^[1-9]. /;
-			if (lines.search(regA) > -1) {
-				numVar = numberListCheck(lines, numVar);
-			}
-
-			const regB = /\{[1-9]\}/;
-			if (lines.search(regB) > -1) {			
-				lines = changeList(lines, numVar);
-			}
-
-			lines = changeWord(lines);
-
-			const regC = new RegExp(regTab(execCount));
-			if (lines.search(regC) > -1) {
-				execFlag = true;
-				consoles += "\n[ " + tempConv(lines.replace(regC, "")) +" ] " + getDate() + "\n";
-	
-				try{
-					const regF = /! .*/;
-					if (lines.search(regF) > -1) {
-						const tmpfilename = text.split("! ");
-						const filename = tmpfilename[1].split("\r\n");
-						let fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + "/" + filename[0]);
-						if (process.platform==='win32') {
-							fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + "\\" + filename[0]);
-						}
-						vscode.workspace.openTextDocument(fileUri).then(doc => {
-							vscode.window.showTextDocument(doc);
-						});
-					} else {
-						if (config['toterminal']===true) {
-							vscode.window.activeTerminal?.sendText(tempConv(lines.replace(regC, "")));
-						} else {
-							const stdout = execSync(tempConv(lines.replace(regC, "")), {timeout: config.timeout});
-							let result = stdout.toString();
-							consoles += convToUTF(result);		
-						}
-					}
-					execCount++;
-				}
-				catch(err){
-					consoles += convToUTF(err.stderr);
-					execCount = 0;
-				}
-			} else {
-				execCount = 0;
-				const regD = new RegExp(regTab(execCount));
-				if (lines.search(regD) > -1) {
-					execFlag = true;
-
-					const regF = /! .*/;
-					if (lines.search(regF) > -1) {
-						const tmpfilename = text.split("! ");
-						const filename = tmpfilename[1].split("\r\n");
-						let fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + "/" + filename[0]);
-						if (process.platform==='win32') {
-							fileUri = vscode.Uri.file(vscode.workspace.workspaceFolders![0].uri.fsPath + "\\" + filename[0]);
-						}
-						vscode.workspace.openTextDocument(fileUri).then(doc => {
-							vscode.window.showTextDocument(doc);
-						});
-					} else {
-						if (config['toterminal']===true) {
-							vscode.window.activeTerminal?.sendText(lines);
-						} else {
-							consoles = doShell(execCount, lines, consoles);
-						}
-					}
-				}
-			}
-
-			const regE = /^```/;
-			if (lines.search(regE) > -1) {
-				if (startLine == 0) {
-					startLine = nowLine;
-				} else {
-					endLine = nowLine;
-					break;
-				}
-			}
-			nowLine++;
-		}
-
-		if (execFlag == true) {
-			if (startLine == 0 && endLine == 0) {
-				if (horizonFlag > -1) {
-					startLine = horizonFlag - 1;
-					endLine = horizonFlag;
-				} else {
-					startLine = doc.lineCount - 1;
-					endLine = doc.lineCount;
-				}
-				consoles = "\n```\n" + consoles + "\n```\n";	
-			} 
-
-			startPos = new vscode.Position(startLine + 1, 0);
-			endPos = new vscode.Position(endLine - 1, 10000);
-			cur_selection = new vscode.Selection(startPos, endPos);
-			editor.edit(edit => {
-				edit.replace(cur_selection, consoles);
-			});	
-
-			if (horizonFlag > -1) {
-				return;	
-			}
-		}
-	});
-
-	context.subscriptions.push(disposable);
+    // Ensure the legacy config file is created on first run, like the
+    // previous version did.
+    try { ensureLegacyConfigFile(); } catch (e) {
+        outputChannel.appendLine(`[lc4ri] legacy config init skipped: ${String(e)}`);
+    }
 }
 
-function doShell(execCount: number, strs: string, consoles: string) {
-	const regA = new RegExp(regTab(execCount));
-	if (strs.search(regA) > -1) {
-		consoles += "\n[ " + tempConv(strs.replace(regA, "")) +" ] " + getDate()+"\n";
-
-		try{
-			const stdout = execSync(tempConv(strs.replace(regA, "")), {timeout: config.timeout});
-			let result = stdout.toString();
-			consoles += convToUTF(result);
-			execCount++;
-		}
-		catch(err){
-			consoles += convToUTF(err.stderr.toString());
-			execCount = 0;
-		}
-	}
-	return consoles;
+export function deactivate() {
+    cancelAll();
+    outputChannel?.dispose();
+    statusBarItem?.dispose();
+    codeLensEmitter?.dispose();
 }
 
-function regTab(cnt: number) {
-	let strs: string;
+// =============================================================================
+// Configuration loading (settings.json first, legacy file fallback)
+// =============================================================================
 
-	strs = "^";
-	
-	for( let i = 0; i < cnt; i++) {
-		strs = strs + "\t";
-	}
-
-	return strs + "- ";
+export function readConfig(): LC4RIConfig {
+    const ws = vscode.workspace.getConfiguration('lc4ri');
+    const legacy = readLegacyConfig();
+    const merged: LC4RIConfig = {
+        timeout:           ws.get<number>('timeout',           legacy.timeout            ?? DEFAULT_CONFIG.timeout),
+        template:          ws.get<{[k:string]:string}>('template', legacy.template       ?? DEFAULT_CONFIG.template),
+        profiles:          ws.get<{[k:string]:string}>('profiles', legacy.profiles       ?? DEFAULT_CONFIG.profiles),
+        changeWord:        ws.get<{[k:string]:string}>('changeWord', legacy.changeWord   ?? DEFAULT_CONFIG.changeWord),
+        toutf8:            ws.get<boolean>('toUtf8',           legacy.toutf8             ?? DEFAULT_CONFIG.toutf8),
+        toterminal:        ws.get<boolean>('toTerminal',       legacy.toterminal         ?? DEFAULT_CONFIG.toterminal),
+        outputFormat:      ws.get<'codeblock' | 'collapsible'>('outputFormat', legacy.outputFormat ?? DEFAULT_CONFIG.outputFormat),
+        dangerousPatterns: ws.get<string[]>('dangerousPatterns', legacy.dangerousPatterns ?? DEFAULT_CONFIG.dangerousPatterns),
+        allowList:         ws.get<string[]>('allowList',       legacy.allowList          ?? DEFAULT_CONFIG.allowList),
+        denyList:          ws.get<string[]>('denyList',        legacy.denyList           ?? DEFAULT_CONFIG.denyList),
+        confirmDangerous:  ws.get<boolean>('confirmDangerous', legacy.confirmDangerous   ?? DEFAULT_CONFIG.confirmDangerous),
+        showCodeLens:      ws.get<boolean>('showCodeLens',     legacy.showCodeLens       ?? DEFAULT_CONFIG.showCodeLens),
+        shell:             ws.get<string | null>('shell',      legacy.shell              ?? DEFAULT_CONFIG.shell)
+    };
+    return merged;
 }
 
-function horizonCheck(strs: string) {
-	const regA = /^\* \* \*/;
-	const regB = /^\*\*\*/;
-	const regC = /^\*\*\*\*/;
-	const regD = /^- - -/;
-
-	if (strs.search(regA) > -1) {
-		return true;
-	}
-	if (strs.search(regB) > -1) {
-		return true;
-	}
-	if (strs.search(regC) > -1) {
-		return true;
-	}
-	if (strs.search(regD) > -1) {
-		return true;
-	}
-	return false;
+function readLegacyConfig(): Partial<LC4RIConfig> {
+    try {
+        const configPath = legacyConfigPath();
+        if (!fs.existsSync(configPath)) { return {}; }
+        const raw = fs.readFileSync(configPath, 'utf8');
+        const obj = JSON.parse(raw);
+        return obj ?? {};
+    } catch (err) {
+        outputChannel?.appendLine(`[lc4ri] legacy config parse error: ${String(err)} — using defaults`);
+        return {};
+    }
 }
 
-function changeList(strs: string, numVar: { [key: string]: string; }) {
-	const nums = strs.split(/{/)[1].split(/}/)[0];
-	return strs.replace("{" + nums + "}", numVar[nums].toString());
+function ensureLegacyConfigFile(): void {
+    const homePath = safeHome();
+    if (!homePath) { return; }
+    const dir = path.join(homePath, '.code-lc4ri');
+    const file = path.join(dir, 'config.json');
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+    if (!fs.existsSync(file)) {
+        fs.writeFileSync(file, JSON.stringify({
+            timeout: DEFAULT_CONFIG.timeout,
+            template: {},
+            profiles: {},
+            changeWord: {},
+            toutf8: true,
+            toterminal: false
+        }, null, 2), 'utf8');
+    }
 }
 
-function getDate() {
-	return new Date(Date.now()).toString();
+function legacyConfigPath(): string {
+    const home = safeHome();
+    if (!home) { return ''; }
+    return process.platform === 'win32'
+        ? path.join(home, '.code-lc4ri', 'config.json')
+        : path.join(home, '.code-lc4ri', 'config.json');
 }
 
-function tempConv(strs: string) {
-	Object.keys(config['template']).forEach(function(k){
-		if (process.platform===k) {
-			strs = config['template'][k].replace("{COMMAND}", strs);
-		}
-	});
-	return strs;
+function safeHome(): string {
+    try {
+        const h = os.homedir();
+        if (h && h.length) { return h; }
+    } catch (_) { /* ignore */ }
+    // last-resort: the previous behaviour of echoing the env var
+    try {
+        const com = process.platform === 'win32' ? 'echo %USERPROFILE%' : 'echo $HOME';
+        const out = execSync(com).toString().replace(/\r\n|\r|\n/, '');
+        return out;
+    } catch (_) {
+        return '';
+    }
 }
 
-function changeWord(strs: string) {
-	Object.keys(config['changeWord']).forEach(function(k){ 
-		if (strs.indexOf(k) > -1) {
-			strs = strs.replace(k, config['changeWord'][k]);
-		}
-	});
-	return strs;
+// =============================================================================
+// Parsing helpers (pure, exported for tests)
+// =============================================================================
+
+/** Match a "- " at depth `cnt` (0 = top-level, 1 = one tab in, ...) */
+export function regTab(cnt: number): string {
+    let s = '^';
+    for (let i = 0; i < cnt; i++) { s += '\t'; }
+    return s + '- ';
 }
 
-function numberListCheck(strs: string, numVar: { [key: string]: string; }) {
-	const nums = strs.split(/. /);
-	try{
-		const stdout = execSync(tempConv(strs.replace(nums[0]+".", "")), {timeout: config.timeout});
-		let result = stdout.toString();
-		numVar[nums[0]] = convToUTF(result);
-		numVar[nums[0]] = numVar[nums[0]].replace(/\r\n|\r|\n/, "");
-	}
-	catch(err){
-		numVar[nums[0]] = convToUTF(err.stderr.toString());
-	}
-	return numVar;
+/**
+ * Default number of spaces that equal one indentation level (= 1 tab).
+ * Used by {@link normalizeIndent}.  4 matches VS Code's default `editor.tabSize`
+ * and the most common Markdown authoring conventions.
+ */
+export const DEFAULT_INDENT_SPACES = 2;
+
+/**
+ * Normalise the leading whitespace of a line so that the rest of the parser
+ * (which is tab-aware via {@link regTab}) can treat space-indented Markdown
+ * the same way as tab-indented Markdown.
+ *
+ *   "    - foo"  → "\t- foo"    (4 spaces = 1 level)
+ *   "  - foo"    → "\t- foo"    (any non-empty indent = at least 1 level)
+ *   "        - foo" → "\t\t- foo"  (8 spaces = 2 levels)
+ *   "\t- foo"    → "\t- foo"    (already tabbed — unchanged)
+ *   "\t  - foo"  → "\t\t- foo"  (mixed)
+ *
+ * This is what makes the AND-chain example
+ *
+ *     - CommandA
+ *         - RouteA
+ *     - RouteB
+ *
+ * behave the same as if the inner item had been indented with a tab.
+ */
+export function normalizeIndent(line: string, tabWidth: number = DEFAULT_INDENT_SPACES): string {
+    const m = line.match(/^([ \t]*)(.*)$/);
+    if (!m) { return line; }
+    const ws = m[1];
+    const rest = m[2];
+    if (ws.length === 0) { return line; }
+    // Resolve every char to a logical column count.  A tab snaps the column to
+    // the next multiple of `tabWidth`, which matches how text editors render.
+    let col = 0;
+    for (const c of ws) {
+        if (c === '\t') {
+            col += tabWidth - (col % tabWidth);
+        } else {
+            col++;
+        }
+    }
+    if (col === 0) { return rest; }
+    const tabs = Math.ceil(col / tabWidth);
+    return '\t'.repeat(tabs) + rest;
 }
 
-function convToUTF(strs: string) {
-	if (config['toutf8']===false) {
-		return strs.toString();
-	}
-	const stra = Encoding.convert(strs, {
-		from: 'SJIS', // from_encoding
-		to: 'UNICODE', // to_encoding
-		type: 'string'
-	});
-	return stra.toString();
+/** Markdown horizontal rule? (***, ---, * * *, ...) */
+export function horizonCheck(line: string): boolean {
+    return /^(?:\*\s?){3,}\s*$/.test(line) || /^(?:-\s?){3,}\s*$/.test(line);
 }
 
-function getHome() {
-	let com,result;
-
-	if (process.platform==='win32') {
-		com = "echo %USERPROFILE%";
-	} else {
-		com = "echo $HOME";
-	}
-
-	try{
-		const stdout = execSync(com);
-		result = stdout.toString();
-		result = result.replace(/\r\n|\r|\n/, "");
-	}
-	catch(err){
-		result = "";
-	}
-	return result;
+/**
+ * Unix-style backslash line continuation.
+ *
+ *   ls \
+ *    -la
+ *
+ * is treated as a single logical command `ls -la`.  Starting from index
+ * `startIdx`, this scans forward while the current line ends in `\` (with
+ * optional trailing whitespace), strips that trailing backslash, joins the
+ * next line (with its leading whitespace removed) using a single space, and
+ * returns the merged line plus the number of source lines that were consumed.
+ *
+ * For lines that do not end with `\`, `consumed` is 1 and `joined` is the
+ * original line unchanged.
+ */
+export function joinContinuedLines(
+    lines: string[],
+    startIdx: number
+): { joined: string; consumed: number } {
+    let line = lines[startIdx] ?? '';
+    let consumed = 1;
+    // A trailing backslash counts as a continuation marker.  Even number of
+    // trailing backslashes (\\, \\\\) means the user really intended literal
+    // backslashes, so we only treat *odd*-count trailing backslashes as a
+    // continuation.
+    while (hasContinuationBackslash(line) && startIdx + consumed < lines.length) {
+        // Strip the trailing "\" *and* any whitespace that immediately
+        // precedes it, so that joining always produces a single space
+        // between the two halves.
+        const stripped = line.replace(/\s*\\\s*$/, '');
+        const next = (lines[startIdx + consumed] ?? '').replace(/^\s+/, '');
+        line = stripped + ' ' + next;
+        consumed++;
+    }
+    return { joined: line, consumed };
 }
 
-function loadConfig() {
-	const homePath = getHome();
-	if (homePath === "") {
-		vscode.window.showInformationMessage("can't get config directory!: " + homePath);
-		return;
-	}
+function hasContinuationBackslash(line: string): boolean {
+    const m = line.match(/(\\+)\s*$/);
+    if (!m) { return false; }
+    return m[1].length % 2 === 1;
+}
 
-	let configDir = homePath + "/.code-lc4ri"
+/**
+ * Detect a list-command line, return its tab depth and command body
+ * (without the leading "- "). Returns null when this is not a list line.
+ */
+export function detectListCommand(line: string): { depth: number; body: string } | null {
+    const m = line.match(/^(\t*)- (.*)$/);
+    if (!m) { return null; }
+    return { depth: m[1].length, body: m[2] };
+}
 
-	if (process.platform==='win32') {
-		configDir = homePath + "\\.code-lc4ri"
-	}
+/** Detect "N. command" where N is 1-9. */
+export function detectNumbered(line: string): { idx: string; body: string } | null {
+    const m = line.match(/^([1-9])\.\s+(.*)$/);
+    if (!m) { return null; }
+    return { idx: m[1], body: m[2] };
+}
 
-	if (fs.existsSync(configDir) === false) {
-		fs.mkdir(configDir, (err) => {
-			if (err) {
-				vscode.window.showInformationMessage("can't create config directory!: " + configDir);
-				return;		
-			}
-		});
-	}
+/**
+ * A trailing " → {name}" (or " -> {name}") binds the command's output to a
+ * named variable. Return the body without the binder + the captured name.
+ */
+export function extractBinding(body: string): { body: string; bindName: string | null } {
+    const m = body.match(/\s*(?:→|->)\s*\{([A-Za-z_][A-Za-z0-9_]*)\}\s*$/);
+    if (!m) { return { body, bindName: null }; }
+    return { body: body.slice(0, m.index), bindName: m[1] };
+}
 
-	let configPath = homePath + "/.code-lc4ri/config.json";
+/** `assert: contains "ok"` / `assert: status == 0` / `assert: regex /.../` */
+export function parseAssert(body: string):
+    | { kind: 'contains'; arg: string }
+    | { kind: 'equals';   arg: string }
+    | { kind: 'status';   arg: number }
+    | { kind: 'regex';    arg: RegExp }
+    | null
+{
+    const m = body.match(/^assert\s*:\s*(.+)$/i);
+    if (!m) { return null; }
+    const rest = m[1].trim();
 
-	if (process.platform==='win32') {
-		configPath = homePath + "\\.code-lc4ri\\config.json";
-	}
+    let r = rest.match(/^contains\s+(?:"([^"]*)"|'([^']*)'|(\S.*))$/i);
+    if (r) { return { kind: 'contains', arg: (r[1] ?? r[2] ?? r[3]).trim() }; }
 
-	if (fs.existsSync(configPath) === true) {
-		const rawdata = fs.readFileSync(configPath, "utf8");
-		config = JSON.parse(rawdata);
-	} else {
-		const tmpConfig = '{ "timeout": 10000, "template": { }, "changeWord": { }, "toutf8": true, "toterminal": false }';
-		config = JSON.parse(tmpConfig);
-		fs.writeFile(configPath, JSON.stringify(config), (err) =>{
-			console.log(err);
-		});
-	}
+    r = rest.match(/^equals\s+(?:"([^"]*)"|'([^']*)'|(\S.*))$/i);
+    if (r) { return { kind: 'equals', arg: (r[1] ?? r[2] ?? r[3]).trim() }; }
+
+    r = rest.match(/^status\s*(?:==|=)\s*(-?\d+)$/i);
+    if (r) { return { kind: 'status', arg: parseInt(r[1], 10) }; }
+
+    r = rest.match(/^regex\s+\/(.+)\/([imsu]*)$/i);
+    if (r) { return { kind: 'regex', arg: new RegExp(r[1], r[2]) }; }
+    return null;
+}
+
+/** Parse a .env-style file and return key → value pairs. */
+export function parseEnvFile(content: string): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) { continue; }
+        const eq = line.indexOf('=');
+        if (eq < 1) { continue; }
+        const key = line.slice(0, eq).trim();
+        let val = line.slice(eq + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1);
+        }
+        if (key) { result[key] = val; }
+    }
+    return result;
+}
+
+/**
+ * Detect a "- write: path" directive line.
+ * Returns the tab depth and file path (variables already substituted by the caller).
+ */
+export function parseWriteDirective(line: string): { depth: number; filePath: string } | null {
+    const m = line.match(/^(\t*)- write:\s+(.+)$/i);
+    if (!m) { return null; }
+    return { depth: m[1].length, filePath: m[2].trim() };
+}
+
+/**
+ * Collect content from a fenced code block (``` or ~~~) starting at `startIdx`.
+ * Skips blank lines before the opening fence.
+ * Strips up to `fenceIndent` spaces of common leading indentation from each content line.
+ * Returns the content string and how many lines were consumed (opening fence through closing fence).
+ * Returns `{ content: null, consumed: 0 }` when no valid fence block is found.
+ */
+export function collectFencedBlock(
+    lines: string[],
+    startIdx: number
+): { content: string; consumed: number } | { content: null; consumed: 0 } {
+    let idx = startIdx;
+    while (idx < lines.length && lines[idx].trim() === '') { idx++; }
+    if (idx >= lines.length) { return { content: null, consumed: 0 }; }
+
+    const openMatch = lines[idx].match(/^(\s*)(`{3,}|~{3,})[^\n]*$/);
+    if (!openMatch) { return { content: null, consumed: 0 }; }
+
+    const fenceIndent = openMatch[1].length;
+    const fenceChar = openMatch[2][0];
+    const fenceLen = openMatch[2].length;
+    const closingRe = new RegExp(`^\\s{0,${fenceIndent}}[${fenceChar}]{${fenceLen},}\\s*$`);
+
+    idx++;
+    const contentLines: string[] = [];
+
+    while (idx < lines.length) {
+        const l = lines[idx];
+        if (closingRe.test(l)) {
+            return { content: contentLines.join('\n'), consumed: idx - startIdx + 1 };
+        }
+        const lead = l.match(/^( *)/)?.[1].length ?? 0;
+        contentLines.push(lead >= fenceIndent ? l.slice(fenceIndent) : l);
+        idx++;
+    }
+
+    return { content: null, consumed: 0 };
+}
+
+/** Detect the `[parallel]` flag prefix on a list-command body. */
+export function detectParallelFlag(body: string): { body: string; parallel: boolean } {
+    const m = body.match(/^\[parallel\]\s*/i);
+    if (!m) { return { body, parallel: false }; }
+    return { body: body.slice(m[0].length), parallel: true };
+}
+
+/** Replace {1}-{9}, {name}, and built-ins like {$PREV}. */
+export function substituteVars(line: string, vars: Variables): string {
+    return line.replace(/\{([^{}\s]+)\}/g, (whole, key: string) => {
+        if (key.startsWith('$')) {
+            switch (key) {
+                case '$PREV':   return vars.prev.replace(/\r?\n+$/, '');
+                case '$STATUS': return String(vars.status);
+                case '$DATE':   return new Date().toISOString();
+                case '$CWD':    return process.cwd();
+                case '$USER':   return os.userInfo().username || '';
+                case '$HOST':   return os.hostname();
+                default:        return whole;
+            }
+        }
+        if (/^[1-9]$/.test(key) && vars.num[key] !== undefined) {
+            return vars.num[key];
+        }
+        if (vars.named[key] !== undefined) { return vars.named[key]; }
+        return whole;
+    });
+}
+
+/** Apply changeWord substitution map. */
+export function applyChangeWord(line: string, map: { [k: string]: string }): string {
+    for (const k of Object.keys(map)) {
+        // global replacement so multiple #HOME# in one line are all replaced
+        const safe = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        line = line.replace(new RegExp(safe, 'g'), map[k]);
+    }
+    return line;
+}
+
+/**
+ * Wrap the resolved command with the chosen profile / OS template.
+ * Active profile takes precedence; otherwise fall back to per-OS template.
+ */
+export function applyTemplate(cmd: string, cfg: LC4RIConfig, profile: string): string {
+    if (profile && cfg.profiles[profile]) {
+        return cfg.profiles[profile].replace('{COMMAND}', cmd);
+    }
+    if (cfg.template && cfg.template[process.platform]) {
+        return cfg.template[process.platform].replace('{COMMAND}', cmd);
+    }
+    return cmd;
+}
+
+// =============================================================================
+// Security (allow / deny / dangerous patterns)
+// =============================================================================
+
+export function matchesAny(s: string, patterns: string[]): string | null {
+    for (const p of patterns) {
+        try {
+            if (new RegExp(p).test(s)) { return p; }
+        } catch (_) {
+            // bad pattern — ignore but log
+            outputChannel?.appendLine(`[lc4ri] bad regex skipped: ${p}`);
+        }
+    }
+    return null;
+}
+
+export interface SecurityVerdict { ok: boolean; reason?: string; dangerous?: string }
+
+export function checkSecurity(cmd: string, cfg: LC4RIConfig): SecurityVerdict {
+    const deny = matchesAny(cmd, cfg.denyList);
+    if (deny) { return { ok: false, reason: `denyList match: /${deny}/` }; }
+    if (cfg.allowList.length > 0) {
+        const allow = matchesAny(cmd, cfg.allowList);
+        if (!allow) { return { ok: false, reason: `not in allowList` }; }
+    }
+    const dangerous = matchesAny(cmd, cfg.dangerousPatterns);
+    if (dangerous) { return { ok: true, dangerous }; }
+    return { ok: true };
+}
+
+async function confirmDangerous(cmd: string, pattern: string): Promise<boolean> {
+    const pick = await vscode.window.showWarningMessage(
+        `⚠ This command matches a dangerous pattern: /${pattern}/\n\n${cmd}\n\nExecute anyway?`,
+        { modal: true },
+        'Run', 'Cancel'
+    );
+    return pick === 'Run';
+}
+
+// =============================================================================
+// Async exec (spawn-based) with timeout and cancellation
+// =============================================================================
+
+function execAsync(
+    cmd: string,
+    cfg: LC4RIConfig,
+    token?: vscode.CancellationToken,
+    cwd?: string,
+    onData?: (chunk: string, isStderr: boolean) => void
+): Promise<ExecResult> {
+    return new Promise<ExecResult>((resolve) => {
+        const shellCmd = cfg.shell ?? (process.platform === 'win32' ? true : '/bin/sh');
+        // If cwd is provided but the directory doesn't exist, spawn will throw
+        // synchronously and emit an `error` event.  We guard with fs.existsSync
+        // to fall back to the parent process's cwd instead.
+        let effectiveCwd: string | undefined = cwd;
+        if (effectiveCwd && !fs.existsSync(effectiveCwd)) {
+            outputChannel?.appendLine(
+                `[lc4ri] tracked cwd "${effectiveCwd}" does not exist — falling back to process cwd`
+            );
+            effectiveCwd = undefined;
+        }
+        const child: ChildProcess = spawn(cmd, {
+            shell: shellCmd as unknown as string,
+            windowsHide: true,
+            cwd: effectiveCwd
+        });
+        runningProcs.add(child);
+
+        let stdoutBuf = Buffer.alloc(0);
+        let stderrBuf = Buffer.alloc(0);
+        let timedOut = false;
+        let cancelled = false;
+
+        const killAll = (signal: NodeJS.Signals = 'SIGTERM') => {
+            try { child.kill(signal); } catch (_) { /* ignore */ }
+            if (process.platform === 'win32' && child.pid) {
+                try { execSync(`taskkill /pid ${child.pid} /T /F`); } catch (_) { /* ignore */ }
+            }
+        };
+
+        const timeoutTimer = setTimeout(() => {
+            timedOut = true;
+            killAll('SIGKILL');
+        }, Math.max(0, cfg.timeout));
+
+        const cancelSub = token?.onCancellationRequested(() => {
+            cancelled = true;
+            killAll('SIGTERM');
+        });
+
+        child.stdout?.on('data', (b: Buffer) => {
+            stdoutBuf = Buffer.concat([stdoutBuf, b]);
+            if (onData) { onData(b.toString(), false); }
+        });
+        child.stderr?.on('data', (b: Buffer) => {
+            stderrBuf = Buffer.concat([stderrBuf, b]);
+            if (onData) { onData(b.toString(), true); }
+        });
+
+        child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+            clearTimeout(timeoutTimer);
+            cancelSub?.dispose();
+            runningProcs.delete(child);
+            resolve({
+                stdout: convToUTF(stdoutBuf, cfg),
+                stderr: convToUTF(stderrBuf, cfg),
+                code: code ?? (signal ? 130 : -1),
+                timedOut,
+                cancelled
+            });
+        });
+
+        child.on('error', (err: Error) => {
+            clearTimeout(timeoutTimer);
+            cancelSub?.dispose();
+            runningProcs.delete(child);
+            resolve({
+                stdout: '',
+                stderr: String(err.message ?? err),
+                code: -1,
+                timedOut,
+                cancelled
+            });
+        });
+    });
+}
+
+function convToUTF(buf: Buffer, cfg: LC4RIConfig): string {
+    if (!cfg.toutf8) { return buf.toString(); }
+    try {
+        const converted = Encoding.convert(buf, {
+            from: 'AUTO',
+            to: 'UNICODE',
+            type: 'string'
+        });
+        return converted as unknown as string;
+    } catch (_) {
+        return buf.toString();
+    }
+}
+
+function cancelAll(): void {
+    for (const p of Array.from(runningProcs)) {
+        try { p.kill('SIGTERM'); } catch (_) { /* ignore */ }
+    }
+    runningProcs.clear();
+    outputChannel?.appendLine('[lc4ri] all running commands cancelled');
+}
+
+// =============================================================================
+// Current working directory tracking (feature: `cd` persistence)
+// =============================================================================
+
+/**
+ * Return the current tracked cwd, initialising it on first call from the
+ * VS Code workspace folder (or process.cwd() as a fallback).
+ */
+export function getCurrentCwd(): string {
+    if (currentCwd && fs.existsSync(currentCwd)) {
+        return currentCwd;
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const resolved: string = folder ? folder.uri.fsPath : process.cwd();
+    currentCwd = resolved;
+    return resolved;
+}
+
+/** Test-only helper: override the tracked cwd directly. */
+export function setCurrentCwd(p: string | undefined): void {
+    currentCwd = p;
+}
+
+/**
+ * Detect whether the resolved command is "purely" a `cd` invocation —
+ * meaning it has no shell control operators (&&, ||, ;, |) and starts with cd.
+ * Examples that match:
+ *   `cd`
+ *   `cd /tmp`
+ *   `cd "with spaces"`
+ *   `cd ../foo`
+ *   `cd -`
+ * Examples that do NOT match:
+ *   `cd foo && ls`
+ *   `cd foo; ls`
+ *   `ls && cd foo`
+ */
+export function isPureCdCommand(cmd: string): boolean {
+    const trimmed = cmd.trim();
+    if (!/^cd(\s|$)/.test(trimmed)) { return false; }
+    // No shell control operators outside of (single/double) quoted strings.
+    let inSingle = false;
+    let inDouble = false;
+    for (let i = 0; i < trimmed.length; i++) {
+        const c = trimmed[i];
+        if (c === '\\') { i++; continue; }
+        if (!inDouble && c === "'") { inSingle = !inSingle; continue; }
+        if (!inSingle && c === '"') { inDouble = !inDouble; continue; }
+        if (inSingle || inDouble) { continue; }
+        if (c === ';' || c === '|' || c === '&') { return false; }
+        if (c === '>' || c === '<') { return false; }
+    }
+    return true;
+}
+
+/**
+ * Resolve a pure `cd` command using a real shell so that `~`, env vars,
+ * `cd -`, relative paths, etc. work exactly as the user expects.  The current
+ * tracked cwd is used as the base directory for the resolution.
+ */
+async function resolveCd(
+    cdCmd: string,
+    cfg: LC4RIConfig,
+    token?: vscode.CancellationToken
+): Promise<{ ok: boolean; newCwd?: string; output: string }> {
+    const baseCwd = getCurrentCwd();
+    const printPwd = process.platform === 'win32' ? 'cd' : 'pwd';
+    const fullCmd = `${cdCmd} && ${printPwd}`;
+    const res = await execAsync(fullCmd, cfg, token, baseCwd);
+    if (res.code !== 0 || res.timedOut || res.cancelled) {
+        return {
+            ok: false,
+            output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '')
+        };
+    }
+    const lines = res.stdout.replace(/\r?\n+$/, '').split(/\r?\n/);
+    const newCwd = lines[lines.length - 1]?.trim();
+    if (!newCwd) {
+        return { ok: false, output: 'could not determine new cwd' };
+    }
+    return { ok: true, newCwd, output: newCwd };
+}
+
+// =============================================================================
+// Main: run from cursor (the original behaviour, now async)
+// =============================================================================
+
+interface RunOptions { dryRun: boolean }
+
+async function runFromCursor(opts: RunOptions): Promise<void> {
+    const cfg = readConfig();
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showWarningMessage('code-lc4ri: no active editor.');
+        return;
+    }
+    if (!opts.dryRun && !vscode.workspace.isTrusted) {
+        vscode.window.showWarningMessage(
+            'code-lc4ri: this workspace is not trusted — only dry-run is available.'
+        );
+        opts = { dryRun: true };
+    }
+
+    const doc = editor.document;
+    const position = editor.selection.active;
+    const startPos = new vscode.Position(position.line, 0);
+    const endPos = new vscode.Position(doc.lineCount - 1, 10000);
+    const range = new vscode.Selection(startPos, endPos);
+    const text = doc.getText(range);
+    const lines = text.split(/\r\n|\r|\n/);
+
+    await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: opts.dryRun ? 'code-lc4ri (dry-run)' : 'code-lc4ri',
+        cancellable: true
+    }, async (progress, token) => {
+        const ctx: RunContext = {
+            cfg,
+            profile: activeProfile,
+            dryRun: opts.dryRun,
+            progress,
+            token,
+            vars: { num: {}, named: {}, prev: '', status: 0 },
+            consoles: '',
+            execCount: 0,
+            execFlag: false,
+            horizonFlag: -1,
+            startLine: 0,
+            endLine: 0,
+            nowLine: position.line,
+            assertionFailed: false
+        };
+        await runLines(lines, ctx);
+
+        if (ctx.execFlag) {
+            await writeBackOutput(editor, doc, ctx);
+        }
+    });
+}
+
+interface RunContext {
+    cfg: LC4RIConfig;
+    profile: string;
+    dryRun: boolean;
+    progress: vscode.Progress<{ message?: string; increment?: number }>;
+    token: vscode.CancellationToken;
+    vars: Variables;
+    consoles: string;
+    execCount: number;
+    execFlag: boolean;
+    horizonFlag: number;
+    startLine: number;
+    endLine: number;
+    nowLine: number;
+    assertionFailed: boolean;
+}
+
+async function runLines(lines: string[], ctx: RunContext): Promise<void> {
+    for (let i = 0; i < lines.length; i++) {
+        if (ctx.token.isCancellationRequested) { break; }
+
+        // ---- Unix backslash line continuation ----------------------------
+        // If a list/numbered command line ends with "\", merge subsequent
+        // continuation lines into a single logical line before the rest of
+        // the parser sees it.  We must also advance i and ctx.nowLine for the
+        // extra lines we just consumed, because the outer for-loop only
+        // increments them once per iteration.
+        const cont = joinContinuedLines(lines, i);
+        let line = cont.joined;
+        if (cont.consumed > 1) {
+            i += cont.consumed - 1;
+            ctx.nowLine += cont.consumed - 1;
+        }
+
+        // ---- Normalise indentation (space → tab) -----------------------
+        // The downstream depth check uses tab-aware regexes via regTab(); by
+        // converting leading spaces to tab-equivalent levels here, the same
+        // AND-chain logic applies regardless of whether the author indented
+        // the inner list item with tabs or spaces.
+        line = normalizeIndent(line);
+
+        if (horizonCheck(line)) {
+            ctx.horizonFlag = ctx.nowLine;
+            break;
+        }
+
+        // Env file directive: # env: <path>
+        const envMatch = line.match(/^#\s*env:\s*(.+)$/);
+        if (envMatch) {
+            const envPath = envMatch[1].trim();
+            const resolved = path.isAbsolute(envPath) ? envPath : path.join(getCurrentCwd(), envPath);
+            try {
+                const content = fs.readFileSync(resolved, 'utf8');
+                const envVars = parseEnvFile(content);
+                Object.assign(ctx.vars.named, envVars);
+                outputChannel?.appendLine(`[lc4ri] loaded env: ${resolved} (${Object.keys(envVars).length} vars)`);
+            } catch (_) {
+                outputChannel?.appendLine(`[lc4ri] env file not found: ${resolved}`);
+            }
+            ctx.nowLine++;
+            continue;
+        }
+
+        // 1. number-list creates {N}
+        const numHit = detectNumbered(line);
+        if (numHit) {
+            await handleNumberedAssignment(numHit, ctx);
+        }
+
+        // expand variables ({N}, {name}, {$PREV} ...)
+        line = substituteVars(line, ctx.vars);
+        line = applyChangeWord(line, ctx.cfg.changeWord);
+
+        // write: directive — write fenced block content to a file
+        const writeDir = parseWriteDirective(line);
+        if (writeDir !== null) {
+            const { depth, filePath } = writeDir;
+            const atExpected = new RegExp(regTab(ctx.execCount)).test(line);
+            const atTop      = new RegExp(regTab(0)).test(line);
+            if (!atExpected && !atTop) {
+                ctx.execCount = 0;
+                ctx.nowLine++;
+                continue;
+            }
+            if (!atExpected) { ctx.execCount = 0; }
+
+            const blk = collectFencedBlock(lines, i + 1);
+            const resolved = path.isAbsolute(filePath)
+                ? filePath
+                : path.join(getCurrentCwd(), filePath);
+            ctx.execFlag = true;
+            const header = `\n[ write: ${filePath} ] ${getDate()}\n`;
+
+            if (blk.content === null) {
+                ctx.consoles += header + `(no fenced block found after write:)\n`;
+                ctx.execCount = 0;
+            } else if (ctx.dryRun) {
+                const n = blk.content.split('\n').length;
+                ctx.consoles += header + `[dry-run] would write ${n} line${n !== 1 ? 's' : ''} to ${resolved}\n`;
+                i += blk.consumed;
+                ctx.nowLine += blk.consumed;
+                ctx.execCount = depth + 1;
+            } else {
+                try {
+                    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+                    fs.writeFileSync(resolved, blk.content + '\n', 'utf8');
+                    const n = blk.content.split('\n').length;
+                    ctx.consoles += header + `wrote ${n} line${n !== 1 ? 's' : ''} to ${resolved}\n`;
+                    pushReport({
+                        command: `write: ${filePath}`, rendered: `write: ${filePath}`,
+                        output: `wrote ${n} line(s) to ${resolved}`, code: 0, ts: getDate(), ok: true
+                    });
+                    i += blk.consumed;
+                    ctx.nowLine += blk.consumed;
+                    ctx.execCount = depth + 1;
+                } catch (err) {
+                    ctx.consoles += header + `error: ${String(err)}\n`;
+                    pushReport({
+                        command: `write: ${filePath}`, rendered: `write: ${filePath}`,
+                        output: String(err), code: 1, ts: getDate(), ok: false
+                    });
+                    ctx.execCount = 0;
+                }
+            }
+            ctx.nowLine++;
+            continue;
+        }
+
+        // - assert: ... support inside an indented chain
+        const assertHit = parseAssert(line.replace(/^\t*- /, ''));
+        if (assertHit && line.match(/^\t*- /)) {
+            const passed = evaluateAssert(assertHit, ctx);
+            const header = `\n[ assert: ${describeAssert(assertHit)} ] ${getDate()}\n`;
+            ctx.consoles += header + (passed ? '✓ pass\n' : '✗ FAIL\n');
+            ctx.execFlag = true;
+            if (!passed) {
+                ctx.assertionFailed = true;
+                ctx.execCount = 0;
+            }
+            ctx.progress.report({ message: `assert ${passed ? 'pass' : 'FAIL'}` });
+            ctx.nowLine++;
+            if (isFenceLine(line)) { /* never */ }
+            continue;
+        }
+
+        const expectedDepthRe = new RegExp(regTab(ctx.execCount));
+        if (expectedDepthRe.test(line)) {
+            const { newIdx, extraNowLine } = await runOrParallel(line, ctx.execCount, lines, i, ctx);
+            i = newIdx;
+            ctx.nowLine += extraNowLine;
+        } else {
+            ctx.execCount = 0;
+            const topRe = new RegExp(regTab(0));
+            if (topRe.test(line)) {
+                const { newIdx, extraNowLine } = await runOrParallel(line, 0, lines, i, ctx);
+                i = newIdx;
+                ctx.nowLine += extraNowLine;
+            }
+        }
+
+        if (isFenceLine(line)) {
+            if (ctx.startLine === 0) {
+                ctx.startLine = ctx.nowLine;
+            } else {
+                ctx.endLine = ctx.nowLine;
+                break;
+            }
+        }
+        ctx.nowLine++;
+    }
+}
+
+function isFenceLine(s: string): boolean { return /^```/.test(s); }
+
+async function handleNumberedAssignment(
+    hit: { idx: string; body: string },
+    ctx: RunContext
+): Promise<void> {
+    const { body, bindName } = extractBinding(hit.body);
+    const cmd = applyChangeWord(substituteVars(body, ctx.vars), ctx.cfg.changeWord);
+    const finalCmd = applyTemplate(cmd, ctx.cfg, ctx.profile);
+    const sec = checkSecurity(finalCmd, ctx.cfg);
+    if (!sec.ok) {
+        ctx.vars.num[hit.idx] = `(blocked: ${sec.reason ?? 'security'})`;
+        outputChannel?.appendLine(`[lc4ri] blocked: ${finalCmd} (${sec.reason})`);
+        return;
+    }
+    if (sec.dangerous && ctx.cfg.confirmDangerous && !ctx.dryRun) {
+        const ok = await confirmDangerous(finalCmd, sec.dangerous);
+        if (!ok) {
+            ctx.vars.num[hit.idx] = '(cancelled by user)';
+            return;
+        }
+    }
+
+    if (ctx.dryRun) {
+        const dry = `[dry-run] ${finalCmd}`;
+        ctx.vars.num[hit.idx] = dry;
+        if (bindName) { ctx.vars.named[bindName] = dry; }
+        return;
+    }
+
+    // Pure cd: update tracked cwd, bind the resulting path to the variable
+    if (isPureCdCommand(finalCmd)) {
+        ctx.progress.report({ message: `cd: ${finalCmd}` });
+        const cdRes = await resolveCd(finalCmd, ctx.cfg, ctx.token);
+        if (cdRes.ok && cdRes.newCwd) {
+            currentCwd = cdRes.newCwd;
+            ctx.vars.num[hit.idx] = currentCwd;
+            if (bindName) { ctx.vars.named[bindName] = currentCwd; }
+            ctx.vars.prev = currentCwd;
+            ctx.vars.status = 0;
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: `cwd changed to ${currentCwd}`,
+                code: 0, ts: getDate(), ok: true
+            });
+        } else {
+            ctx.vars.num[hit.idx] = `(cd failed: ${cdRes.output})`;
+            if (bindName) { ctx.vars.named[bindName] = ctx.vars.num[hit.idx]; }
+            ctx.vars.status = 1;
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: cdRes.output, code: 1, ts: getDate(), ok: false
+            });
+        }
+        return;
+    }
+
+    ctx.progress.report({ message: `setting {${hit.idx}}: ${finalCmd}` });
+    const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(),
+        (chunk, isStderr) => outputChannel?.append(isStderr ? `[stderr] ${chunk}` : chunk));
+    const trimmed = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
+    ctx.vars.num[hit.idx] = trimmed;
+    if (bindName) { ctx.vars.named[bindName] = trimmed; }
+    ctx.vars.prev = res.stdout;
+    ctx.vars.status = res.code;
+    pushReport({
+        command: finalCmd, rendered: finalCmd,
+        output: trimmed, code: res.code,
+        ts: getDate(),
+        ok: res.code === 0 && !res.timedOut && !res.cancelled
+    });
+}
+
+async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): Promise<void> {
+    const stripRe = new RegExp(regTab(depth));
+    const rawBody = rawLine.replace(stripRe, '');
+    const { body: noParallelBody } = detectParallelFlag(rawBody);
+    const { body: cleanBody, bindName } = extractBinding(noParallelBody);
+
+    // runbook include: "include: path/to/other.md"
+    if (/^include:\s+/i.test(noParallelBody)) {
+        const includePath = noParallelBody.replace(/^include:\s+/i, '').trim();
+        await runInclude(includePath, ctx);
+        ctx.execFlag = true;
+        ctx.execCount = depth + 1;
+        return;
+    }
+
+    // file open in new tab: "open: path"
+    if (/^open:\s+/i.test(cleanBody)) {
+        const fname = cleanBody.replace(/^open:\s+/i, '').trim();
+        await openFileTab(fname);
+        ctx.execFlag = true;
+        ctx.execCount = depth + 1;
+        return;
+    }
+
+    // terminal passthrough: "! command"  (sends to active terminal, no output capture)
+    if (/^!\s+/.test(cleanBody)) {
+        const termCmd = cleanBody.replace(/^!\s+/, '').trim();
+        ctx.consoles += `\n[ ! ${termCmd} ] ${getDate()}\n`;
+        ctx.execFlag = true;
+        if (ctx.dryRun) {
+            ctx.consoles += `[dry-run: terminal] ${termCmd}\n`;
+        } else {
+            vscode.window.activeTerminal?.sendText(termCmd);
+            ctx.consoles += `(sent to terminal)\n`;
+        }
+        ctx.execCount = depth + 1;
+        return;
+    }
+
+    const baseCmd = cleanBody;
+    const finalCmd = applyTemplate(baseCmd, ctx.cfg, ctx.profile);
+    const sec = checkSecurity(finalCmd, ctx.cfg);
+
+    ctx.execFlag = true;
+    ctx.consoles += `\n[ ${finalCmd} ] ${getDate()}\n`;
+
+    if (!sec.ok) {
+        ctx.consoles += `(blocked by security: ${sec.reason})\n`;
+        ctx.execCount = 0;
+        return;
+    }
+    if (sec.dangerous && ctx.cfg.confirmDangerous && !ctx.dryRun) {
+        const ok = await confirmDangerous(finalCmd, sec.dangerous);
+        if (!ok) {
+            ctx.consoles += '(cancelled by user)\n';
+            ctx.execCount = 0;
+            return;
+        }
+    }
+
+    if (ctx.dryRun) {
+        ctx.consoles += `[dry-run] ${finalCmd}\n`;
+        if (isPureCdCommand(finalCmd)) {
+            ctx.consoles += `(dry-run: cwd would be resolved from "${getCurrentCwd()}")\n`;
+        }
+        ctx.execCount = depth + 1;
+        return;
+    }
+
+    // When the user enabled toTerminal we still want the command to appear in
+    // the terminal panel for visibility, but the post-execution output must
+    // also be written back to the Markdown buffer.  We therefore mirror the
+    // command into the terminal here, then continue with the regular spawn
+    // execution below so that stdout/stderr can be captured.
+    if (ctx.cfg.toterminal) {
+        vscode.window.activeTerminal?.sendText(finalCmd);
+        ctx.consoles += `(sent to terminal)\n`;
+    }
+
+    // ---- Pure `cd` command: update tracked cwd without running it twice. ----
+    if (isPureCdCommand(finalCmd)) {
+        ctx.progress.report({ message: `cd: ${finalCmd}` });
+        const cdRes = await resolveCd(finalCmd, ctx.cfg, ctx.token);
+        if (cdRes.ok && cdRes.newCwd) {
+            currentCwd = cdRes.newCwd;
+            ctx.consoles += `(cwd → ${currentCwd})\n`;
+            ctx.vars.prev = currentCwd;
+            ctx.vars.status = 0;
+            if (bindName) { ctx.vars.named[bindName] = currentCwd; }
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: `cwd changed to ${currentCwd}`,
+                code: 0, ts: getDate(), ok: true
+            });
+            ctx.execCount = depth + 1;
+        } else {
+            ctx.consoles += `${cdRes.output}\n[cd failed]\n`;
+            ctx.vars.status = 1;
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: cdRes.output,
+                code: 1, ts: getDate(), ok: false
+            });
+            ctx.execCount = 0;
+        }
+        return;
+    }
+
+    ctx.progress.report({ message: finalCmd });
+    const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(),
+        (chunk, isStderr) => outputChannel?.append(isStderr ? `[stderr] ${chunk}` : chunk));
+    const out = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '');
+    ctx.consoles += out;
+    if (res.timedOut)  { ctx.consoles += `\n[timeout after ${ctx.cfg.timeout}ms]\n`; }
+    if (res.cancelled) { ctx.consoles += `\n[cancelled]\n`; }
+    if (res.code !== 0 && !res.cancelled && !res.timedOut) {
+        ctx.consoles += `\n[exit ${res.code}]\n`;
+    }
+
+    ctx.vars.prev = res.stdout;
+    ctx.vars.status = res.code;
+    if (bindName) { ctx.vars.named[bindName] = (res.stdout || res.stderr).replace(/\r?\n+$/, ''); }
+
+    pushReport({
+        command: finalCmd, rendered: finalCmd,
+        output: out, code: res.code,
+        ts: getDate(),
+        ok: res.code === 0 && !res.timedOut && !res.cancelled
+    });
+
+    if (res.code === 0 && !res.timedOut && !res.cancelled) {
+        ctx.execCount = depth + 1;
+    } else {
+        ctx.execCount = 0;
+    }
+}
+
+async function runInclude(includePath: string, ctx: RunContext): Promise<void> {
+    const resolved = path.isAbsolute(includePath)
+        ? includePath
+        : path.join(getCurrentCwd(), includePath);
+
+    if (!fs.existsSync(resolved)) {
+        ctx.consoles += `\n[include: file not found: ${resolved}]\n`;
+        return;
+    }
+
+    outputChannel?.appendLine(`[lc4ri] including: ${resolved}`);
+    ctx.consoles += `\n[ include: ${resolved} ] ${getDate()}\n`;
+
+    let content: string;
+    try {
+        content = fs.readFileSync(resolved, 'utf8');
+    } catch (err) {
+        ctx.consoles += `\n[include: read error: ${String(err)}]\n`;
+        return;
+    }
+
+    const includedLines = content.split(/\r?\n/);
+    const subCtx: RunContext = {
+        ...ctx,
+        consoles: '',
+        execCount: 0,
+        execFlag: false,
+        horizonFlag: -1,
+        startLine: 0,
+        endLine: 0,
+        nowLine: 0,
+        assertionFailed: false
+    };
+
+    await runLines(includedLines, subCtx);
+
+    ctx.consoles += subCtx.consoles;
+    ctx.vars = subCtx.vars;
+    ctx.execFlag = ctx.execFlag || subCtx.execFlag;
+}
+
+async function runParallelGroup(rawLines: string[], depth: number, ctx: RunContext): Promise<void> {
+    ctx.execFlag = true;
+    const depthRe = new RegExp(regTab(depth));
+
+    const tasks = rawLines.map(async (rawLine) => {
+        const rawBody = rawLine.replace(depthRe, '');
+        const { body: noParallelBody } = detectParallelFlag(rawBody);
+        const { body: cleanBody, bindName } = extractBinding(noParallelBody);
+
+        const substituted = substituteVars(cleanBody, ctx.vars);
+        const afterChange = applyChangeWord(substituted, ctx.cfg.changeWord);
+        const finalCmd = applyTemplate(afterChange, ctx.cfg, ctx.profile);
+
+        const header = `\n[ ${finalCmd} ] ${getDate()}\n`;
+
+        if (ctx.dryRun) {
+            return { header, output: `[dry-run] ${finalCmd}\n`, ok: true, bindName, bindVal: '' };
+        }
+
+        const sec = checkSecurity(finalCmd, ctx.cfg);
+        if (!sec.ok) {
+            return { header, output: `(blocked: ${sec.reason})\n`, ok: false, bindName, bindVal: '' };
+        }
+
+        ctx.progress.report({ message: `[parallel] ${finalCmd}` });
+        const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(),
+            (chunk, isStderr) => outputChannel?.append(
+                isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`
+            ));
+
+        const out = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '');
+        let suffix = '';
+        if (res.timedOut)  { suffix += `\n[timeout after ${ctx.cfg.timeout}ms]\n`; }
+        if (res.cancelled) { suffix += `\n[cancelled]\n`; }
+        if (res.code !== 0 && !res.cancelled && !res.timedOut) { suffix += `\n[exit ${res.code}]\n`; }
+
+        const bindVal = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
+        const ok = res.code === 0 && !res.timedOut && !res.cancelled;
+        pushReport({ command: finalCmd, rendered: finalCmd, output: out + suffix, code: res.code, ts: getDate(), ok });
+        return { header, output: out + suffix, ok, bindName, bindVal };
+    });
+
+    const results = await Promise.all(tasks);
+
+    for (const r of results) {
+        ctx.consoles += r.header + r.output;
+        if (r.bindName) { ctx.vars.named[r.bindName] = r.bindVal; }
+    }
+
+    ctx.execCount = results.every(r => r.ok) ? depth + 1 : 0;
+}
+
+async function runOrParallel(
+    firstLine: string,
+    depth: number,
+    lines: string[],
+    curIdx: number,
+    ctx: RunContext
+): Promise<{ newIdx: number; extraNowLine: number }> {
+    const depthRe = new RegExp(regTab(depth));
+    const bodyForCheck = firstLine.replace(depthRe, '');
+    const { parallel } = detectParallelFlag(bodyForCheck);
+
+    if (!parallel) {
+        await runOneCommand(firstLine, depth, ctx);
+        return { newIdx: curIdx, extraNowLine: 0 };
+    }
+
+    const parallelLines: string[] = [firstLine];
+    let j = curIdx + 1;
+    let extraNowLine = 0;
+
+    while (j < lines.length && !ctx.token.isCancellationRequested) {
+        const nextCont = joinContinuedLines(lines, j);
+        const nextLine = normalizeIndent(nextCont.joined);
+        if (horizonCheck(nextLine)) { break; }
+        if (!depthRe.test(nextLine)) { break; }
+        const nextBody = nextLine.replace(depthRe, '');
+        const { parallel: nextParallel } = detectParallelFlag(nextBody);
+        if (!nextParallel) { break; }
+        parallelLines.push(nextLine);
+        extraNowLine += nextCont.consumed;
+        j += nextCont.consumed;
+    }
+
+    await runParallelGroup(parallelLines, depth, ctx);
+    return { newIdx: j - 1, extraNowLine };
+}
+
+async function openFileTab(fname: string): Promise<void> {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+        vscode.window.showWarningMessage(`code-lc4ri: cannot resolve "${fname}" — no workspace open.`);
+        return;
+    }
+    const fullPath = path.isAbsolute(fname) ? fname : path.join(folder.uri.fsPath, fname);
+    try {
+        const uri = vscode.Uri.file(fullPath);
+        const doc = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(doc);
+    } catch (err) {
+        vscode.window.showWarningMessage(`code-lc4ri: cannot open "${fname}": ${String(err)}`);
+    }
+}
+
+function evaluateAssert(
+    a: NonNullable<ReturnType<typeof parseAssert>>,
+    ctx: RunContext
+): boolean {
+    switch (a.kind) {
+        case 'contains': return ctx.vars.prev.indexOf(a.arg) !== -1;
+        case 'equals':   return ctx.vars.prev.trim() === a.arg;
+        case 'status':   return ctx.vars.status === a.arg;
+        case 'regex':    return a.arg.test(ctx.vars.prev);
+    }
+}
+
+function describeAssert(a: NonNullable<ReturnType<typeof parseAssert>>): string {
+    switch (a.kind) {
+        case 'contains': return `contains "${a.arg}"`;
+        case 'equals':   return `equals "${a.arg}"`;
+        case 'status':   return `status == ${a.arg}`;
+        case 'regex':    return `regex ${a.arg.toString()}`;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// write back: same wrap-in-fences semantics as the original
+// -----------------------------------------------------------------------------
+
+async function writeBackOutput(
+    editor: vscode.TextEditor,
+    doc: vscode.TextDocument,
+    ctx: RunContext
+): Promise<void> {
+    let body = ctx.consoles;
+    let startLine = ctx.startLine;
+    let endLine = ctx.endLine;
+
+    if (startLine === 0 && endLine === 0) {
+        if (ctx.horizonFlag > -1) {
+            startLine = ctx.horizonFlag - 1;
+            endLine = ctx.horizonFlag;
+        } else {
+            startLine = doc.lineCount - 1;
+            endLine = doc.lineCount;
+        }
+        if (ctx.cfg.outputFormat === 'collapsible') {
+            body = `\n<details><summary>output ${getDate()}</summary>\n\n\`\`\`\n${body}\n\`\`\`\n\n</details>\n`;
+        } else {
+            body = `\n\`\`\`\n${body}\n\`\`\`\n`;
+        }
+    }
+
+    const startPos = new vscode.Position(startLine + 1, 0);
+    const endPos = new vscode.Position(Math.max(0, endLine - 1), 10000);
+    const sel = new vscode.Selection(startPos, endPos);
+    await editor.edit(edit => { edit.replace(sel, body); });
+}
+
+// =============================================================================
+// runSingleLine: invoked by the CodeLens "▶ Run" / "Dry-run" actions
+// =============================================================================
+
+async function runSingleLine(uri: vscode.Uri, line: number, dryRun: boolean): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.toString() !== uri.toString()) {
+        await vscode.window.showTextDocument(uri);
+    }
+    const newEditor = vscode.window.activeTextEditor;
+    if (!newEditor) { return; }
+
+    // Move cursor onto the requested line, then re-use runFromCursor.
+    const pos = new vscode.Position(line, 0);
+    newEditor.selection = new vscode.Selection(pos, pos);
+    await runFromCursor({ dryRun });
+}
+
+// =============================================================================
+// CodeLens provider
+// =============================================================================
+
+class LC4RICodeLensProvider implements vscode.CodeLensProvider {
+    public onDidChangeCodeLenses?: vscode.Event<void>;
+    constructor(emitter: vscode.Event<void>) {
+        this.onDidChangeCodeLenses = emitter;
+    }
+    provideCodeLenses(doc: vscode.TextDocument): vscode.ProviderResult<vscode.CodeLens[]> {
+        const cfg = readConfig();
+        if (!cfg.showCodeLens) { return []; }
+        const lenses: vscode.CodeLens[] = [];
+        for (let i = 0; i < doc.lineCount; i++) {
+            const line = doc.lineAt(i).text;
+            if (detectListCommand(line) || detectNumbered(line)) {
+                const range = doc.lineAt(i).range;
+                lenses.push(new vscode.CodeLens(range, {
+                    title: '▶ Run',
+                    command: 'extension.lc4ri.runLine',
+                    arguments: [doc.uri, i, false]
+                }));
+                lenses.push(new vscode.CodeLens(range, {
+                    title: 'Dry-run',
+                    command: 'extension.lc4ri.runLine',
+                    arguments: [doc.uri, i, true]
+                }));
+            }
+        }
+        return lenses;
+    }
+}
+
+// =============================================================================
+// Status bar / profile switcher
+// =============================================================================
+
+function updateStatusBar(): void {
+    if (!statusBarItem) { return; }
+    const cfg = readConfig();
+    const profileNames = Object.keys(cfg.profiles);
+    const label = activeProfile
+        ? `$(terminal) lc4ri: ${activeProfile}`
+        : (profileNames.length ? '$(terminal) lc4ri: (none)' : '$(terminal) lc4ri');
+    statusBarItem.text = label;
+}
+
+async function switchProfile(): Promise<void> {
+    const cfg = readConfig();
+    const items: vscode.QuickPickItem[] = [
+        { label: '(none)', description: 'use legacy OS-keyed template only' },
+        ...Object.keys(cfg.profiles).map(k => ({ label: k, description: cfg.profiles[k] }))
+    ];
+    const pick = await vscode.window.showQuickPick(items, {
+        title: 'code-lc4ri: switch execution profile',
+        placeHolder: activeProfile || '(none)'
+    });
+    if (!pick) { return; }
+    activeProfile = pick.label === '(none)' ? '' : pick.label;
+    updateStatusBar();
+    outputChannel?.appendLine(`[lc4ri] active profile -> ${activeProfile || '(none)'}`);
+}
+
+// =============================================================================
+// Misc commands
+// =============================================================================
+
+async function clearOutputBlock(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) { return; }
+    const doc = editor.document;
+    const cursor = editor.selection.active.line;
+
+    // find the nearest ``` ... ``` block that contains or follows the cursor
+    let start = -1, end = -1;
+    for (let i = cursor; i < doc.lineCount; i++) {
+        if (/^```/.test(doc.lineAt(i).text)) { start = i; break; }
+    }
+    if (start === -1) { return; }
+    for (let i = start + 1; i < doc.lineCount; i++) {
+        if (/^```/.test(doc.lineAt(i).text)) { end = i; break; }
+    }
+    if (end === -1) { return; }
+
+    const range = new vscode.Range(
+        new vscode.Position(start, 0),
+        new vscode.Position(end, doc.lineAt(end).text.length)
+    );
+    await editor.edit(b => b.replace(range, '```\n```'));
+}
+
+function getDate(): string {
+    return new Date(Date.now()).toString();
+}
+
+function pushReport(entry: ReportEntry): void {
+    reportEntries.push(entry);
+    outputChannel?.appendLine(
+        `[${entry.ts}] (${entry.ok ? 'ok' : 'NG'} code=${entry.code}) ${entry.command}`
+    );
+}
+
+// =============================================================================
+// Export report  (Markdown / HTML)
+// =============================================================================
+
+async function exportReport(kind: 'md' | 'html' = 'html'): Promise<void> {
+    if (reportEntries.length === 0) {
+        vscode.window.showInformationMessage('code-lc4ri: nothing to export yet.');
+        return;
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const dir = folder ? folder.uri.fsPath : os.tmpdir();
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const fname = path.join(dir, `lc4ri-report-${stamp}.${kind}`);
+
+    const body = kind === 'md' ? buildMarkdownReport() : buildHtmlReport();
+    fs.writeFileSync(fname, body, 'utf8');
+    const open = await vscode.window.showInformationMessage(
+        `code-lc4ri: report saved to ${fname}`,
+        'Open'
+    );
+    if (open === 'Open') {
+        const doc = await vscode.workspace.openTextDocument(fname);
+        await vscode.window.showTextDocument(doc);
+    }
+}
+
+function buildMarkdownReport(): string {
+    let s = `# code-lc4ri execution report\n\n`;
+    s += `- generated: ${new Date().toISOString()}\n`;
+    s += `- profile:   ${activeProfile || '(none)'}\n`;
+    s += `- host:      ${os.hostname()}\n`;
+    s += `- user:      ${os.userInfo().username}\n\n`;
+    for (const e of reportEntries) {
+        s += `## ${e.ok ? '✅' : '❌'} ${e.command}\n\n`;
+        s += `- at: ${e.ts}\n- exit: ${e.code}\n\n\`\`\`\n${e.output}\n\`\`\`\n\n`;
+    }
+    return s;
+}
+
+function buildHtmlReport(): string {
+    const rows = reportEntries.map(e => `
+        <section class="${e.ok ? 'ok' : 'ng'}">
+            <h3>${escapeHtml(e.command)}</h3>
+            <p class="meta">at ${escapeHtml(e.ts)} — exit ${e.code}</p>
+            <pre>${escapeHtml(e.output)}</pre>
+        </section>`).join('\n');
+    return `<!doctype html><html><head><meta charset="utf-8"><title>lc4ri report</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:920px;margin:2em auto;padding:0 1em;}
+  h1{border-bottom:1px solid #ccc;}
+  section{border-left:4px solid #aaa;margin:1em 0;padding:0.5em 1em;}
+  section.ok{border-color:#3a3;background:#f3fbf3;}
+  section.ng{border-color:#c33;background:#fbf3f3;}
+  pre{background:#111;color:#eee;padding:1em;overflow:auto;}
+  .meta{color:#666;font-size:0.9em;}
+</style></head><body>
+<h1>code-lc4ri execution report</h1>
+<p><b>generated:</b> ${escapeHtml(new Date().toISOString())}<br>
+<b>profile:</b> ${escapeHtml(activeProfile || '(none)')}<br>
+<b>host:</b> ${escapeHtml(os.hostname())}<br>
+<b>user:</b> ${escapeHtml(os.userInfo().username)}</p>
+${rows}
+</body></html>`;
+}
+
+function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    } as { [k: string]: string })[c]);
 }

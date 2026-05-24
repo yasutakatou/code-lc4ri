@@ -251,6 +251,267 @@ It can be used as evidence of execution time.
 
 <br>
 
+---
+
+# v1.0: major refactor — what's new
+
+This release rewrites the core runner. **All existing v0.x documents keep working** (list / number list / `***` separator / `! file` / `template` / `changeWord` / `toutf8` / `toterminal` are unchanged). The new features are additive.
+
+## 1. Asynchronous execution + progress + cancel
+
+The old `execSync` loop is gone. Commands are now spawned and the UI no longer freezes.
+
+- A toast appears in the bottom-right showing the currently running command.
+- The toast has a **Cancel** button. Clicking it sends `SIGTERM` to every running child process.
+- Timeouts are still honoured (`lc4ri.timeout`), but a timeout now records `[timeout after Nms]` in the output instead of throwing.
+- Non-zero exits are recorded as `[exit N]`.
+
+New command: `code-lc4ri: Cancel running commands` (`extension.lc4ri.cancel`).
+
+## 2. Inline ▶ Run / Dry-run buttons (CodeLens)
+
+Every `- command` / `1. command` line in a Markdown file gets an inline action:
+
+```
+▶ Run | Dry-run
+- uname -a
+```
+
+You no longer need to move the cursor and trigger the global shortcut for a one-off line. Disable with `"lc4ri.showCodeLens": false`.
+
+## 3. settings.json migration (backward-compatible)
+
+The extension now reads its configuration from **VS Code settings** first, then falls back to the legacy `~/.code-lc4ri/config.json`. Both work. Settings UI is auto-generated.
+
+```jsonc
+// settings.json
+{
+  "lc4ri.timeout": 15000,
+  "lc4ri.profiles": {
+    "prod-ssh": "ssh ops@prod.example.com {COMMAND}",
+    "docker":   "docker exec -i app sh -c \"{COMMAND}\""
+  },
+  "lc4ri.changeWord": { "#HOME#": "/home/user" },
+  "lc4ri.outputFormat": "collapsible",
+  "lc4ri.confirmDangerous": true,
+  "lc4ri.showCodeLens": true
+}
+```
+
+Other hardening: `JSON.parse` failures no longer crash activation, `workspaceFolders` is null-checked, `err.stderr` is no longer assumed to be a string.
+
+## 4. Workspace Trust + dangerous-command guard
+
+- The extension declares `"untrustedWorkspaces": { "supported": "limited" }` — in **Restricted Mode**, only dry-run is allowed. This blocks "open the doc → it runs `rm -rf /`" attacks.
+- Commands matching `lc4ri.dangerousPatterns` raise a modal confirmation. A reasonable default list ships out of the box (`rm -rf /`, `dd if=`, `mkfs.`, fork bombs, `curl | sh`, raw block-device writes, etc.).
+- `lc4ri.denyList` flatly refuses matching commands; `lc4ri.allowList`, when non-empty, only lets matching commands run. Both accept JavaScript regex strings.
+- Every executed command is mirrored to the **code-lc4ri** Output channel for auditing.
+
+## 5. Named variables, built-ins, output binding
+
+Previously variables were limited to `{1}` … `{9}`. Now:
+
+| syntax | meaning |
+|---|---|
+| `1. cmd → {host}` | bind the output of the numbered command to **both** `{1}` and `{host}` |
+| `- cmd → {files}` | bind the output of a list command to `{files}` |
+| `{$PREV}` | stdout of the previous command |
+| `{$STATUS}` | exit code of the previous command |
+| `{$DATE}` / `{$CWD}` / `{$USER}` / `{$HOST}` | runtime values |
+
+Example:
+
+```markdown
+1. hostname → {host}
+- echo working on {host}
+- false
+- assert: status == 1
+```
+
+## 6. Assertions (`- assert: ...`)
+
+Verify the previous command's output / exit code inside an indented chain:
+
+```markdown
+- curl -s http://api.local/health
+    - assert: contains "ok"
+    - assert: status == 0
+    - assert: regex /version: \d+/
+```
+
+Assertion outcomes are written into the output block (`✓ pass` / `✗ FAIL`) and a failure breaks the AND-chain just like a failed command does.
+
+## 7. Status-bar profile switcher
+
+A `lc4ri: <profile>` item appears on the right side of the status bar. Click it to pick a profile defined in `lc4ri.profiles`. The active profile wraps each command with its `{COMMAND}` template — useful for SSH / Docker / kubectl context switching without editing the doc.
+
+The legacy per-OS `template` still applies when no profile is selected.
+
+## 8. Report export
+
+Generate a timestamped execution report from this session:
+
+- `code-lc4ri: Export execution report (HTML)` → styled HTML with ✓/✗ markers per command.
+- `code-lc4ri: Export execution report (Markdown)` → plain Markdown.
+
+The report contains every command executed since activation (including timestamps and exit codes) — useful as operational evidence or as a CI artefact.
+
+## 9. CLI runner (headless / CI)
+
+A `code-lc4ri` binary is shipped that re-uses the same parser:
+
+```
+npx code-lc4ri run runbook.md
+npx code-lc4ri run runbook.md --dry-run
+npx code-lc4ri run runbook.md --profile prod-ssh --report report.html
+```
+
+Exit code is non-zero if any command failed or any `assert:` failed, so it slots into CI directly. Run `npm run compile` once before using the CLI from source.
+
+## 10. New commands cheatsheet
+
+| Command | What it does |
+|---|---|
+| `extension.lc4ri` | Run from cursor (the original behaviour) |
+| `extension.lc4ri.dryRun` | Run from cursor, but only show the resolved commands |
+| `extension.lc4ri.runLine` | Run a single line (used by CodeLens) |
+| `extension.lc4ri.cancel` | Cancel every running child process |
+| `extension.lc4ri.switchProfile` | Pick an execution profile |
+| `extension.lc4ri.clearOutput` | Empty the nearest ```` ``` ```` block below the cursor |
+| `extension.lc4ri.exportReport` | Export an HTML report |
+| `extension.lc4ri.exportReportMd` | Export a Markdown report |
+
+## 11. New settings cheatsheet
+
+| Key | Default | Description |
+|---|---|---|
+| `lc4ri.timeout` | `10000` | Per-command timeout in ms |
+| `lc4ri.template` | `{}` | Legacy per-OS template (`{ "linux": "ssh u@h {COMMAND}" }`) |
+| `lc4ri.profiles` | `{}` | Named profiles selectable from the status bar |
+| `lc4ri.changeWord` | `{}` | Pre→post substitution map |
+| `lc4ri.toUtf8` | `true` | Auto-detect encoding and convert to UTF-8 |
+| `lc4ri.toTerminal` | `false` | Send to active terminal instead of capturing |
+| `lc4ri.outputFormat` | `codeblock` | `codeblock` or `collapsible` (uses `<details>`) |
+| `lc4ri.dangerousPatterns` | _(see below)_ | Regex patterns that prompt a confirmation |
+| `lc4ri.allowList` | `[]` | If non-empty, only matching commands run |
+| `lc4ri.denyList` | `[]` | Matching commands never run |
+| `lc4ri.confirmDangerous` | `true` | Show a modal for dangerous matches |
+| `lc4ri.showCodeLens` | `true` | Show ▶ Run / Dry-run on list lines |
+| `lc4ri.shell` | `null` | Shell binary (null = system default) |
+
+Default dangerous patterns: `rm -rf /`, `dd if=`, `mkfs.`, `shutdown`, `reboot`, fork bombs, `curl|sh`, `wget|sh`, `> /dev/sd*`.
+
+## 12. Developer-side changes
+
+- `engines.vscode` raised to `^1.74.0`; `@types/vscode` and `@types/node` updated; `typescript` bumped to 5.x; `eslint` to 8.x; redundant `iconv` / `iconv-lite` / `jschardet` removed.
+- Pure helpers (`regTab`, `horizonCheck`, `detectListCommand`, `detectNumbered`, `extractBinding`, `substituteVars`, `applyChangeWord`, `applyTemplate`, `checkSecurity`, `parseAssert`) are now `export`ed.
+- `npm test` runs a stand-alone Node test runner (`src/test/runUnit.ts`) over those helpers — 32 cases, no `vscode` host required.
+
+## 13. Migration notes
+
+Nothing to do — your existing documents and `~/.code-lc4ri/config.json` keep working as before. To opt into the new features, add the relevant `lc4ri.*` keys to your `settings.json`. To migrate **off** the legacy file entirely, copy its contents under the matching `lc4ri.*` keys and delete the file.
+
+<br>
+
+---
+
+# v1.1: New features
+
+## 1. Command execution prefix
+
+Prefix your prompt to control how Bash calls are dispatched in the current turn:
+
+| Prefix | Behavior |
+|---|---|
+| `& <message>` | All Bash calls in this turn run in **background** |
+| `! <command>` | Run directly in the **user's terminal** (Claude Code built-in) |
+| _(none)_ | Normal **foreground** execution (default) |
+
+## 2. `.env` file loading
+
+Write the following anywhere in a runbook to load environment variables from a file:
+
+```markdown
+# env: .env.prod
+- echo {DB_HOST}
+```
+
+`parseEnvFile()` is exported and usable from the CLI as well.
+
+## 3. Runbook include
+
+Inline-execute another Markdown file. Variable bindings set inside the included file propagate back to the parent scope:
+
+```markdown
+- include: setup.md
+- echo setup complete
+```
+
+Circular references are detected and blocked by the CLI.
+
+## 4. Parallel execution
+
+Lines prefixed with `[parallel]` are grouped and executed with `Promise.all`:
+
+```markdown
+- [parallel] ssh server1 uptime
+- [parallel] ssh server2 uptime
+- [parallel] ssh server3 uptime
+```
+
+All commands must succeed for the AND-chain to continue; one failure resets it.
+
+## 5. File open and terminal send directives
+
+| Runbook syntax | Behavior |
+|---|---|
+| `- ! path.md` / `- open: path.md` | Open the file in a **new VS Code tab** |
+| `- ! command` | Send to the **active terminal** (no output capture) |
+
+Terminal send uses `vscode.window.activeTerminal?.sendText()`. In CLI mode `- ! command` runs as a normal shell command.
+
+## 6. AND-chain indent fix (`tabWidth` default changed to 2)
+
+`DEFAULT_INDENT_SPACES` was changed from **4 to 2** so that standard 2-space Markdown indentation maps correctly to AND-chain depth:
+
+| Spaces | Old (tabWidth=4) | New (tabWidth=2) |
+|---|---|---|
+| 2 spaces | depth 1 | depth 1 |
+| 4 spaces | depth 1 ← bug | depth 2 ✓ |
+| 6 spaces | depth 2 | depth 3 |
+
+Example:
+
+```markdown
+- echo a       ← depth 0: always runs
+  - echo b     ← depth 1: runs only if a succeeds
+    - echo c   ← depth 2: runs only if b succeeds
+- echo d       ← depth 0: always runs
+```
+
+Users who prefer 4-space indentation can restore the previous behaviour with `"lc4ri.tabWidth": 4`.
+
+## 7. `write:` directive
+
+Write the contents of a fenced code block to a file directly from a runbook:
+
+````markdown
+- write: output/config.yaml
+  ```yaml
+  database:
+    host: localhost
+    port: 5432
+  ```
+````
+
+- The fenced block (`` ``` `` or `~~~`) content is written verbatim to the specified file.
+- Variable substitution (`{varName}`, `{$PREV}`, etc.) is supported in the file path.
+- Missing parent directories are created automatically.
+- Participates in AND-chain — an indented `write:` only runs if the parent command succeeded.
+- `--dry-run` shows the resolved path and content without writing.
+
+<br>
+
 # LICENSE
 
 MIT License
