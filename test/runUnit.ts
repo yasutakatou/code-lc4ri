@@ -226,5 +226,32 @@ eq('startIdx offset',
     { content: 'body', consumed: 3 }
 );
 
+console.log('isPureExportCommand');
+truthy('export VAR=val',            ext.isPureExportCommand('export FOO=bar'));
+truthy('export multiple',           ext.isPureExportCommand('export FOO=bar BAZ=qux'));
+truthy('export PATH',               ext.isPureExportCommand('export PATH=/usr/local/bin:$PATH'));
+truthy('export no value',           ext.isPureExportCommand('export MY_VAR'));
+truthy('export quoted value',       ext.isPureExportCommand('export MSG="hello world"'));
+truthy('export alone is pure',      ext.isPureExportCommand('export'));
+truthy('export && echo is NOT',     !ext.isPureExportCommand('export FOO=bar && echo $FOO'));
+truthy('export ; echo is NOT',      !ext.isPureExportCommand('export FOO=bar; echo $FOO'));
+truthy('export | cat is NOT',       !ext.isPureExportCommand('export FOO=bar | cat'));
+truthy('unset is NOT',              !ext.isPureExportCommand('unset FOO'));
+truthy('echo export is NOT',        !ext.isPureExportCommand('echo export'));
+truthy('exportfoo is NOT',          !ext.isPureExportCommand('exportfoo=1'));
+
+console.log('getCurrentEnv / setCurrentEnv');
+ext.setCurrentEnv({});
+eq('initial env empty', ext.getCurrentEnv(), {});
+ext.setCurrentEnv({ FOO: 'bar' });
+eq('setCurrentEnv sets value', ext.getCurrentEnv(), { FOO: 'bar' });
+ext.setCurrentEnv({ FOO: 'bar', BAZ: '42' });
+eq('setCurrentEnv multiple', ext.getCurrentEnv(), { FOO: 'bar', BAZ: '42' });
+// setCurrentEnv should not share reference (mutation safety)
+const envSnap = ext.getCurrentEnv();
+ext.setCurrentEnv({});
+truthy('setCurrentEnv is not shared ref', envSnap.FOO === 'bar');
+eq('cleared env is empty', ext.getCurrentEnv(), {});
+
 console.log(`\n${passed} passed / ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

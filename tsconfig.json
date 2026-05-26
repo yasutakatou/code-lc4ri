@@ -6,7 +6,11 @@
         "outDir": "out",
         "sourceMap": true,
         "strict": true,
-        "rootDir": "src"
+        "rootDir": "src",
+        "types": [
+          "vscode",
+          "node"
+        ]
     },
     "include": ["src/**/*"],
     "exclude": ["node_modules", ".vscode-test", "out", "out-test", "test", "bin"]

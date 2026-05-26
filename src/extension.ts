@@ -87,6 +87,14 @@ let codeLensEmitter: vscode.EventEmitter<void> | undefined;
  */
 let currentCwd: string | undefined = undefined;
 
+/**
+ * Tracked environment variables set via `export VAR=value` commands.
+ * These are merged with `process.env` for every subsequent command execution,
+ * so that variables exported in one step are visible in later steps — just
+ * as they would be in an interactive shell session.
+ */
+let currentEnv: Record<string, string> = {};
+
 // -----------------------------------------------------------------------------
 // Defaults
 // -----------------------------------------------------------------------------
@@ -189,6 +197,7 @@ export function deactivate() {
     outputChannel?.dispose();
     statusBarItem?.dispose();
     codeLensEmitter?.dispose();
+    currentEnv = {};
 }
 
 // =============================================================================
@@ -600,7 +609,8 @@ function execAsync(
     cfg: LC4RIConfig,
     token?: vscode.CancellationToken,
     cwd?: string,
-    onData?: (chunk: string, isStderr: boolean) => void
+    onData?: (chunk: string, isStderr: boolean) => void,
+    env?: Record<string, string>
 ): Promise<ExecResult> {
     return new Promise<ExecResult>((resolve) => {
         const shellCmd = cfg.shell ?? (process.platform === 'win32' ? true : '/bin/sh');
@@ -614,10 +624,16 @@ function execAsync(
             );
             effectiveCwd = undefined;
         }
+        // Merge tracked exported variables with process.env so that variables
+        // set by earlier `export` commands are visible to this child process.
+        const effectiveEnv = env && Object.keys(env).length > 0
+            ? { ...process.env, ...env } as NodeJS.ProcessEnv
+            : undefined;
         const child: ChildProcess = spawn(cmd, {
             shell: shellCmd as unknown as string,
             windowsHide: true,
-            cwd: effectiveCwd
+            cwd: effectiveCwd,
+            ...(effectiveEnv ? { env: effectiveEnv } : {})
         });
         runningProcs.add(child);
 
@@ -726,6 +742,160 @@ export function setCurrentCwd(p: string | undefined): void {
 }
 
 /**
+ * Return the accumulated environment variables set by `export` commands
+ * during this session.  These are merged with `process.env` before each
+ * child-process launch so that later commands see earlier exports.
+ */
+export function getCurrentEnv(): Record<string, string> {
+    return currentEnv;
+}
+
+/** Test-only helper: override the tracked env directly. */
+export function setCurrentEnv(env: Record<string, string>): void {
+    currentEnv = { ...env };
+}
+
+/**
+ * Detect whether the resolved command is "purely" an `export` invocation —
+ * meaning it has no shell control operators (&&, ||, ;, |) and consists only
+ * of one or more `export VAR=value` (or `export VAR`) assignments.
+ *
+ * Examples that match:
+ *   `export FOO=bar`
+ *   `export FOO=bar BAZ=qux`
+ *   `export PATH=/usr/local/bin:$PATH`
+ *   `export MY_VAR`          (re-export without value — retained as-is)
+ *
+ * Examples that do NOT match:
+ *   `export FOO=bar && echo $FOO`
+ *   `echo hi; export X=1`
+ *   `unset FOO`
+ */
+export function isPureExportCommand(cmd: string): boolean {
+    const trimmed = cmd.trim();
+    if (!/^export(\s|$)/.test(trimmed)) { return false; }
+    // Reject if shell control operators appear outside of quoted strings.
+    let inSingle = false;
+    let inDouble = false;
+    for (let i = 0; i < trimmed.length; i++) {
+        const c = trimmed[i];
+        if (c === '\\') { i++; continue; }
+        if (!inDouble && c === "'") { inSingle = !inSingle; continue; }
+        if (!inSingle && c === '"') { inDouble = !inDouble; continue; }
+        if (inSingle || inDouble) { continue; }
+        if (c === ';' || c === '|' || c === '&') { return false; }
+        if (c === '>' || c === '<') { return false; }
+    }
+    return true;
+}
+
+/**
+ * Parse a pure `export` command and return the key-value pairs it defines.
+ * Uses a real shell (via the existing execAsync infrastructure) to expand
+ * variable references like `export PATH=/usr/local/bin:$PATH` correctly.
+ *
+ * Strategy: run `<exportCmd> && env` in the current environment so that the
+ * shell performs all expansions, then diff the output against the process env
+ * to find the newly exported names (we only track names that appear explicitly
+ * in the export command, not transitive side-effects).
+ */
+async function resolveExport(
+    exportCmd: string,
+    cfg: LC4RIConfig,
+    token?: vscode.CancellationToken
+): Promise<{ ok: boolean; vars: Record<string, string>; output: string }> {
+    const baseCwd = getCurrentCwd();
+    // Merge already-tracked exports into the environment for the resolution
+    // so that chained exports (`export B=$A` after `export A=1`) work.
+    const baseEnv = Object.keys(currentEnv).length > 0
+        ? { ...process.env, ...currentEnv } as NodeJS.ProcessEnv
+        : undefined;
+
+    // We run: <exportCmd> && env
+    // and parse the resulting env dump to find the keys that changed.
+    const probeCmd = `${exportCmd} && env`;
+
+    // Build a temporary execAsync call that accepts an explicit env map.
+    const res = await new Promise<ExecResult>((resolve) => {
+        const shellCmd = cfg.shell ?? (process.platform === 'win32' ? true : '/bin/sh');
+        let effectiveCwd: string | undefined = baseCwd;
+        if (effectiveCwd && !fs.existsSync(effectiveCwd)) { effectiveCwd = undefined; }
+        const child: ChildProcess = spawn(probeCmd, {
+            shell: shellCmd as unknown as string,
+            windowsHide: true,
+            cwd: effectiveCwd,
+            ...(baseEnv ? { env: baseEnv } : {})
+        });
+        runningProcs.add(child);
+        let stdoutBuf = Buffer.alloc(0);
+        let stderrBuf = Buffer.alloc(0);
+        let timedOut = false;
+        let cancelled = false;
+        const killAll = (signal: NodeJS.Signals = 'SIGTERM') => {
+            try { child.kill(signal); } catch (_) { /* ignore */ }
+        };
+        const timeoutTimer = setTimeout(() => { timedOut = true; killAll('SIGKILL'); }, Math.max(0, cfg.timeout));
+        const cancelSub = token?.onCancellationRequested(() => { cancelled = true; killAll('SIGTERM'); });
+        child.stdout?.on('data', (b: Buffer) => { stdoutBuf = Buffer.concat([stdoutBuf, b]); });
+        child.stderr?.on('data', (b: Buffer) => { stderrBuf = Buffer.concat([stderrBuf, b]); });
+        child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+            clearTimeout(timeoutTimer); cancelSub?.dispose(); runningProcs.delete(child);
+            resolve({ stdout: convToUTF(stdoutBuf, cfg), stderr: convToUTF(stderrBuf, cfg),
+                code: code ?? (signal ? 130 : -1), timedOut, cancelled });
+        });
+        child.on('error', (err: Error) => {
+            clearTimeout(timeoutTimer); cancelSub?.dispose(); runningProcs.delete(child);
+            resolve({ stdout: '', stderr: String(err.message ?? err), code: -1, timedOut, cancelled });
+        });
+    });
+
+    if (res.code !== 0 || res.timedOut || res.cancelled) {
+        return {
+            ok: false,
+            vars: {},
+            output: (res.stderr || res.stdout || `export failed (exit ${res.code})`).replace(/\r?\n+$/, '')
+        };
+    }
+
+    // Parse the `env` dump.  Lines may be multi-line if a value contains \n,
+    // so we use a simple state machine: a new var starts when we see "KEY=".
+    const envDump: Record<string, string> = {};
+    let currentKey: string | null = null;
+    let currentVal: string[] = [];
+    for (const rawLine of res.stdout.split(/\r?\n/)) {
+        const eqIdx = rawLine.indexOf('=');
+        // A valid env key contains only word chars — use that to detect new entries.
+        if (eqIdx > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawLine.slice(0, eqIdx))) {
+            if (currentKey !== null) { envDump[currentKey] = currentVal.join('\n'); }
+            currentKey = rawLine.slice(0, eqIdx);
+            currentVal = [rawLine.slice(eqIdx + 1)];
+        } else if (currentKey !== null) {
+            currentVal.push(rawLine);
+        }
+    }
+    if (currentKey !== null) { envDump[currentKey] = currentVal.join('\n'); }
+
+    // Extract the variable names explicitly listed in the export command.
+    // Pattern: export [NAME | NAME=...] ...
+    const exportedNames: string[] = [];
+    const body = exportCmd.replace(/^export\s+/, '');
+    for (const token of body.split(/\s+/)) {
+        const name = token.split('=')[0];
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) { exportedNames.push(name); }
+    }
+
+    const captured: Record<string, string> = {};
+    for (const name of exportedNames) {
+        if (name in envDump) { captured[name] = envDump[name]; }
+    }
+
+    const summary = Object.entries(captured)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(', ');
+    return { ok: true, vars: captured, output: summary || '(no variables captured)' };
+}
+
+/**
  * Detect whether the resolved command is "purely" a `cd` invocation —
  * meaning it has no shell control operators (&&, ||, ;, |) and starts with cd.
  * Examples that match:
@@ -770,7 +940,7 @@ async function resolveCd(
     const baseCwd = getCurrentCwd();
     const printPwd = process.platform === 'win32' ? 'cd' : 'pwd';
     const fullCmd = `${cdCmd} && ${printPwd}`;
-    const res = await execAsync(fullCmd, cfg, token, baseCwd);
+    const res = await execAsync(fullCmd, cfg, token, baseCwd, undefined, currentEnv);
     if (res.code !== 0 || res.timedOut || res.cancelled) {
         return {
             ok: false,
@@ -1071,9 +1241,37 @@ async function handleNumberedAssignment(
         return;
     }
 
+    // Pure export: capture env vars for subsequent commands
+    if (isPureExportCommand(finalCmd)) {
+        ctx.progress.report({ message: `export: ${finalCmd}` });
+        const expRes = await resolveExport(finalCmd, ctx.cfg, ctx.token);
+        if (expRes.ok) {
+            Object.assign(currentEnv, expRes.vars);
+            ctx.vars.num[hit.idx] = expRes.output;
+            if (bindName) { ctx.vars.named[bindName] = expRes.output; }
+            ctx.vars.prev = expRes.output;
+            ctx.vars.status = 0;
+            outputChannel?.appendLine(`[lc4ri] export: ${expRes.output}`);
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: expRes.output, code: 0, ts: getDate(), ok: true
+            });
+        } else {
+            ctx.vars.num[hit.idx] = `(export failed: ${expRes.output})`;
+            if (bindName) { ctx.vars.named[bindName] = ctx.vars.num[hit.idx]; }
+            ctx.vars.status = 1;
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: expRes.output, code: 1, ts: getDate(), ok: false
+            });
+        }
+        return;
+    }
+
     ctx.progress.report({ message: `setting {${hit.idx}}: ${finalCmd}` });
     const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(),
-        (chunk, isStderr) => outputChannel?.append(isStderr ? `[stderr] ${chunk}` : chunk));
+        (chunk, isStderr) => outputChannel?.append(isStderr ? `[stderr] ${chunk}` : chunk),
+        currentEnv);
     const trimmed = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
     ctx.vars.num[hit.idx] = trimmed;
     if (bindName) { ctx.vars.named[bindName] = trimmed; }
@@ -1152,6 +1350,9 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
         if (isPureCdCommand(finalCmd)) {
             ctx.consoles += `(dry-run: cwd would be resolved from "${getCurrentCwd()}")\n`;
         }
+        if (isPureExportCommand(finalCmd)) {
+            ctx.consoles += `(dry-run: environment variable would be exported)\n`;
+        }
         ctx.execCount = depth + 1;
         return;
     }
@@ -1195,9 +1396,38 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
         return;
     }
 
+    // ---- Pure `export` command: capture env vars for subsequent commands. ----
+    if (isPureExportCommand(finalCmd)) {
+        ctx.progress.report({ message: `export: ${finalCmd}` });
+        const expRes = await resolveExport(finalCmd, ctx.cfg, ctx.token);
+        if (expRes.ok) {
+            Object.assign(currentEnv, expRes.vars);
+            ctx.consoles += `(env → ${expRes.output})\n`;
+            ctx.vars.prev = expRes.output;
+            ctx.vars.status = 0;
+            if (bindName) { ctx.vars.named[bindName] = expRes.output; }
+            outputChannel?.appendLine(`[lc4ri] export: ${expRes.output}`);
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: expRes.output, code: 0, ts: getDate(), ok: true
+            });
+            ctx.execCount = depth + 1;
+        } else {
+            ctx.consoles += `${expRes.output}\n[export failed]\n`;
+            ctx.vars.status = 1;
+            pushReport({
+                command: finalCmd, rendered: finalCmd,
+                output: expRes.output, code: 1, ts: getDate(), ok: false
+            });
+            ctx.execCount = 0;
+        }
+        return;
+    }
+
     ctx.progress.report({ message: finalCmd });
     const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(),
-        (chunk, isStderr) => outputChannel?.append(isStderr ? `[stderr] ${chunk}` : chunk));
+        (chunk, isStderr) => outputChannel?.append(isStderr ? `[stderr] ${chunk}` : chunk),
+        currentEnv);
     const out = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '');
     ctx.consoles += out;
     if (res.timedOut)  { ctx.consoles += `\n[timeout after ${ctx.cfg.timeout}ms]\n`; }
@@ -1293,7 +1523,7 @@ async function runParallelGroup(rawLines: string[], depth: number, ctx: RunConte
         const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(),
             (chunk, isStderr) => outputChannel?.append(
                 isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`
-            ));
+            ), currentEnv);
 
         const out = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '');
         let suffix = '';

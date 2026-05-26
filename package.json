@@ -2,17 +2,20 @@
     "name": "code-lc4ri",
     "displayName": "code-lc4ri",
     "description": "LC4RI for VS Code — Markdown driven reproducible operations",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "publisher": "yasutakatou",
     "repository": "https://github.com/yasutakatou/code-lc4ri",
     "engines": {
-        "vscode": "^1.74.0"
+        "vscode": "^1.120.0"
     },
     "categories": [
         "Notebooks",
         "Other"
     ],
     "main": "./out/extension.js",
+    "activationEvents": [
+        "onLanguage:markdown"
+    ],
     "bin": {
         "code-lc4ri": "./bin/code-lc4ri.js"
     },
@@ -24,32 +27,127 @@
     },
     "contributes": {
         "commands": [
-            { "command": "extension.lc4ri",                   "title": "code-lc4ri: Run from cursor" },
-            { "command": "extension.lc4ri.dryRun",            "title": "code-lc4ri: Dry-run from cursor" },
-            { "command": "extension.lc4ri.runLine",           "title": "code-lc4ri: Run this line" },
-            { "command": "extension.lc4ri.cancel",            "title": "code-lc4ri: Cancel running commands" },
-            { "command": "extension.lc4ri.switchProfile",     "title": "code-lc4ri: Switch execution profile" },
-            { "command": "extension.lc4ri.clearOutput",       "title": "code-lc4ri: Clear nearest output block" },
-            { "command": "extension.lc4ri.exportReport",      "title": "code-lc4ri: Export execution report (HTML)" },
-            { "command": "extension.lc4ri.exportReportMd",    "title": "code-lc4ri: Export execution report (Markdown)" },
-            { "command": "extension.lc4ri.exportReportHtml",  "title": "code-lc4ri: Export execution report (HTML)" }
+            {
+                "command": "extension.lc4ri",
+                "title": "code-lc4ri: Run from cursor"
+            },
+            {
+                "command": "extension.lc4ri.dryRun",
+                "title": "code-lc4ri: Dry-run from cursor"
+            },
+            {
+                "command": "extension.lc4ri.runLine",
+                "title": "code-lc4ri: Run this line"
+            },
+            {
+                "command": "extension.lc4ri.cancel",
+                "title": "code-lc4ri: Cancel running commands"
+            },
+            {
+                "command": "extension.lc4ri.switchProfile",
+                "title": "code-lc4ri: Switch execution profile"
+            },
+            {
+                "command": "extension.lc4ri.clearOutput",
+                "title": "code-lc4ri: Clear nearest output block"
+            },
+            {
+                "command": "extension.lc4ri.exportReport",
+                "title": "code-lc4ri: Export execution report (HTML)"
+            },
+            {
+                "command": "extension.lc4ri.exportReportMd",
+                "title": "code-lc4ri: Export execution report (Markdown)"
+            },
+            {
+                "command": "extension.lc4ri.exportReportHtml",
+                "title": "code-lc4ri: Export execution report (HTML)"
+            }
         ],
         "configuration": {
             "title": "code-lc4ri",
             "properties": {
-                "lc4ri.timeout":           { "type": "number",  "default": 10000, "description": "Command timeout in milliseconds." },
-                "lc4ri.template":          { "type": "object",  "default": {},    "description": "Per-OS legacy template, e.g. { \"linux\": \"ssh u@h {COMMAND}\" }." },
-                "lc4ri.profiles":          { "type": "object",  "default": {},    "description": "Named execution profiles selectable from the status bar." },
-                "lc4ri.changeWord":        { "type": "object",  "default": {},    "description": "Pre→post substitution map applied to every command." },
-                "lc4ri.toUtf8":            { "type": "boolean", "default": true,  "description": "Auto-detect output encoding and convert to UTF-8." },
-                "lc4ri.toTerminal":        { "type": "boolean", "default": false, "description": "If true, send the command to the active terminal instead of capturing output." },
-                "lc4ri.outputFormat":      { "type": "string",  "default": "codeblock", "enum": ["codeblock", "collapsible"], "description": "How freshly written output blocks are formatted." },
-                "lc4ri.dangerousPatterns": { "type": "array",   "items": { "type": "string" }, "default": [], "description": "Regex patterns considered dangerous; the user is asked to confirm before running." },
-                "lc4ri.allowList":         { "type": "array",   "items": { "type": "string" }, "default": [], "description": "Regex allow-list; if non-empty, only matching commands run." },
-                "lc4ri.denyList":          { "type": "array",   "items": { "type": "string" }, "default": [], "description": "Regex deny-list; matching commands never run." },
-                "lc4ri.confirmDangerous":  { "type": "boolean", "default": true,  "description": "Show a confirmation dialog when a command matches a dangerous pattern." },
-                "lc4ri.showCodeLens":      { "type": "boolean", "default": true,  "description": "Show inline ▶ Run / Dry-run actions on list lines." },
-                "lc4ri.shell":             { "type": ["string", "null"], "default": null, "description": "Shell binary to use (null = system default)." }
+                "lc4ri.timeout": {
+                    "type": "number",
+                    "default": 10000,
+                    "description": "Command timeout in milliseconds."
+                },
+                "lc4ri.template": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Per-OS legacy template, e.g. { \"linux\": \"ssh u@h {COMMAND}\" }."
+                },
+                "lc4ri.profiles": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Named execution profiles selectable from the status bar."
+                },
+                "lc4ri.changeWord": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Pre→post substitution map applied to every command."
+                },
+                "lc4ri.toUtf8": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Auto-detect output encoding and convert to UTF-8."
+                },
+                "lc4ri.toTerminal": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "If true, send the command to the active terminal instead of capturing output."
+                },
+                "lc4ri.outputFormat": {
+                    "type": "string",
+                    "default": "codeblock",
+                    "enum": [
+                        "codeblock",
+                        "collapsible"
+                    ],
+                    "description": "How freshly written output blocks are formatted."
+                },
+                "lc4ri.dangerousPatterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Regex patterns considered dangerous; the user is asked to confirm before running."
+                },
+                "lc4ri.allowList": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Regex allow-list; if non-empty, only matching commands run."
+                },
+                "lc4ri.denyList": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Regex deny-list; matching commands never run."
+                },
+                "lc4ri.confirmDangerous": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show a confirmation dialog when a command matches a dangerous pattern."
+                },
+                "lc4ri.showCodeLens": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show inline ▶ Run / Dry-run actions on list lines."
+                },
+                "lc4ri.shell": {
+                    "type": [
+                        "string",
+                        "null"
+                    ],
+                    "default": null,
+                    "description": "Shell binary to use (null = system default)."
+                }
             }
         }
     },
@@ -62,12 +160,12 @@
         "test": "npm run compile:test && node ./out-test/test/runUnit.js"
     },
     "devDependencies": {
-        "@types/node": "^18.19.0",
-        "@types/vscode": "^1.74.0",
+        "@types/node": "^18.19.130",
+        "@types/vscode": "^1.120.0",
         "@typescript-eslint/eslint-plugin": "^6.0.0",
         "@typescript-eslint/parser": "^6.0.0",
         "eslint": "^8.50.0",
-        "typescript": "^5.4.0"
+        "typescript": "^6.0.3"
     },
     "dependencies": {
         "@types/encoding-japanese": "^1.0.15",
