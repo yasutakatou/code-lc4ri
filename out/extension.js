@@ -58,6 +58,8 @@ exports.getCurrentCwd = getCurrentCwd;
 exports.setCurrentCwd = setCurrentCwd;
 exports.getCurrentEnv = getCurrentEnv;
 exports.setCurrentEnv = setCurrentEnv;
+exports.getPersistentVars = getPersistentVars;
+exports.setPersistentVars = setPersistentVars;
 exports.isPureExportCommand = isPureExportCommand;
 exports.isPureCdCommand = isPureCdCommand;
 // =============================================================================
@@ -105,6 +107,20 @@ let currentCwd = undefined;
  * as they would be in an interactive shell session.
  */
 let currentEnv = {};
+/**
+ * Persistent named and numbered variables set via `cmd → {NAME}` or
+ * `1. cmd → {NAME}` bindings.  These survive horizontal-rule boundaries
+ * and across multiple `runFromCursor` invocations, mirroring the behaviour
+ * of `currentCwd` and `currentEnv`.
+ *
+ * `$PREV` and `$STATUS` are intentionally NOT persisted here — they reflect
+ * the immediately preceding command result and would be misleading if carried
+ * across unrelated executions.
+ */
+let persistentVars = {
+    num: {},
+    named: {}
+};
 // -----------------------------------------------------------------------------
 // Defaults
 // -----------------------------------------------------------------------------
@@ -174,6 +190,7 @@ function deactivate() {
     statusBarItem === null || statusBarItem === void 0 ? void 0 : statusBarItem.dispose();
     codeLensEmitter === null || codeLensEmitter === void 0 ? void 0 : codeLensEmitter.dispose();
     currentEnv = {};
+    persistentVars = { num: {}, named: {} };
 }
 // =============================================================================
 // Configuration loading (settings.json first, legacy file fallback)
@@ -738,6 +755,14 @@ function getCurrentEnv() {
 function setCurrentEnv(env) {
     currentEnv = { ...env };
 }
+/** Return the persistent named/numbered variable store (test helper). */
+function getPersistentVars() {
+    return { num: { ...persistentVars.num }, named: { ...persistentVars.named } };
+}
+/** Override the persistent variable store directly (test helper). */
+function setPersistentVars(v) {
+    persistentVars = { num: { ...v.num }, named: { ...v.named } };
+}
 /**
  * Detect whether the resolved command is "purely" an `export` invocation —
  * meaning it has no shell control operators (&&, ||, ;, |) and consists only
@@ -1003,7 +1028,7 @@ async function runFromCursor(opts) {
             dryRun: opts.dryRun,
             progress,
             token,
-            vars: { num: {}, named: {}, prev: '', status: 0 },
+            vars: { num: { ...persistentVars.num }, named: { ...persistentVars.named }, prev: '', status: 0 },
             consoles: '',
             execCount: 0,
             execFlag: false,
@@ -1165,9 +1190,16 @@ async function runLines(lines, ctx) {
             }
             else {
                 ctx.endLine = ctx.nowLine;
+                // Sync vars before breaking so the final command's results persist.
+                Object.assign(persistentVars.num, ctx.vars.num);
+                Object.assign(persistentVars.named, ctx.vars.named);
                 break;
             }
         }
+        // Sync named/numbered variables into persistent store so they survive
+        // horizontal-rule boundaries and subsequent runFromCursor invocations.
+        Object.assign(persistentVars.num, ctx.vars.num);
+        Object.assign(persistentVars.named, ctx.vars.named);
         ctx.nowLine++;
     }
 }

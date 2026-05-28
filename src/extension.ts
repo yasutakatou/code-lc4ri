@@ -95,6 +95,21 @@ let currentCwd: string | undefined = undefined;
  */
 let currentEnv: Record<string, string> = {};
 
+/**
+ * Persistent named and numbered variables set via `cmd → {NAME}` or
+ * `1. cmd → {NAME}` bindings.  These survive horizontal-rule boundaries
+ * and across multiple `runFromCursor` invocations, mirroring the behaviour
+ * of `currentCwd` and `currentEnv`.
+ *
+ * `$PREV` and `$STATUS` are intentionally NOT persisted here — they reflect
+ * the immediately preceding command result and would be misleading if carried
+ * across unrelated executions.
+ */
+let persistentVars: { num: Record<string, string>; named: Record<string, string> } = {
+    num: {},
+    named: {}
+};
+
 // -----------------------------------------------------------------------------
 // Defaults
 // -----------------------------------------------------------------------------
@@ -198,6 +213,7 @@ export function deactivate() {
     statusBarItem?.dispose();
     codeLensEmitter?.dispose();
     currentEnv = {};
+    persistentVars = { num: {}, named: {} };
 }
 
 // =============================================================================
@@ -755,6 +771,16 @@ export function setCurrentEnv(env: Record<string, string>): void {
     currentEnv = { ...env };
 }
 
+/** Return the persistent named/numbered variable store (test helper). */
+export function getPersistentVars(): { num: Record<string, string>; named: Record<string, string> } {
+    return { num: { ...persistentVars.num }, named: { ...persistentVars.named } };
+}
+
+/** Override the persistent variable store directly (test helper). */
+export function setPersistentVars(v: { num: Record<string, string>; named: Record<string, string> }): void {
+    persistentVars = { num: { ...v.num }, named: { ...v.named } };
+}
+
 /**
  * Detect whether the resolved command is "purely" an `export` invocation —
  * meaning it has no shell control operators (&&, ||, ;, |) and consists only
@@ -994,7 +1020,7 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
             dryRun: opts.dryRun,
             progress,
             token,
-            vars: { num: {}, named: {}, prev: '', status: 0 },
+            vars: { num: { ...persistentVars.num }, named: { ...persistentVars.named }, prev: '', status: 0 },
             consoles: '',
             execCount: 0,
             execFlag: false,
@@ -1177,9 +1203,18 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
                 ctx.startLine = ctx.nowLine;
             } else {
                 ctx.endLine = ctx.nowLine;
+                // Sync vars before breaking so the final command's results persist.
+                Object.assign(persistentVars.num, ctx.vars.num);
+                Object.assign(persistentVars.named, ctx.vars.named);
                 break;
             }
         }
+
+        // Sync named/numbered variables into persistent store so they survive
+        // horizontal-rule boundaries and subsequent runFromCursor invocations.
+        Object.assign(persistentVars.num, ctx.vars.num);
+        Object.assign(persistentVars.named, ctx.vars.named);
+
         ctx.nowLine++;
     }
 }
