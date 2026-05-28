@@ -1057,7 +1057,11 @@ interface RunContext {
 
 async function runLines(lines: string[], ctx: RunContext): Promise<void> {
     for (let i = 0; i < lines.length; i++) {
-        if (ctx.token.isCancellationRequested) { break; }
+        if (ctx.token.isCancellationRequested) {
+            Object.assign(persistentVars.num, ctx.vars.num);
+            Object.assign(persistentVars.named, ctx.vars.named);
+            break;
+        }
 
         // ---- Unix backslash line continuation ----------------------------
         // If a list/numbered command line ends with "\", merge subsequent
@@ -1081,6 +1085,8 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
 
         if (horizonCheck(line)) {
             ctx.horizonFlag = ctx.nowLine;
+            Object.assign(persistentVars.num, ctx.vars.num);
+            Object.assign(persistentVars.named, ctx.vars.named);
             break;
         }
 

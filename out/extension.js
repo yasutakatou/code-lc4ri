@@ -1047,6 +1047,8 @@ async function runFromCursor(opts) {
 async function runLines(lines, ctx) {
     for (let i = 0; i < lines.length; i++) {
         if (ctx.token.isCancellationRequested) {
+            Object.assign(persistentVars.num, ctx.vars.num);
+            Object.assign(persistentVars.named, ctx.vars.named);
             break;
         }
         // ---- Unix backslash line continuation ----------------------------
@@ -1069,6 +1071,8 @@ async function runLines(lines, ctx) {
         line = normalizeIndent(line);
         if (horizonCheck(line)) {
             ctx.horizonFlag = ctx.nowLine;
+            Object.assign(persistentVars.num, ctx.vars.num);
+            Object.assign(persistentVars.named, ctx.vars.named);
             break;
         }
         // Env file directive: # env: <path>
