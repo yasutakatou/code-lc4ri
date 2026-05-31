@@ -2,7 +2,7 @@
 // =============================================================================
 // code-lc4ri — Markdown + LC4RI for VS Code
 // -----------------------------------------------------------------------------
-// v1.1+: Added Prompt Directive, Retry Directive, and Live Streaming.
+// v1.3+: Added Code Block Execution (bash/zsh/sh) and Auto-Write (yaml/conf/json).
 // =============================================================================
 
 import * as vscode from 'vscode';
@@ -326,7 +326,6 @@ export function parseWriteDirective(line: string): { depth: number; filePath: st
     return { depth: m[1].length, filePath: m[2].trim() };
 }
 
-// ---- NEW: Prompt Directive ----
 export function parsePromptDirective(line: string): { depth: number; bindName: string; message: string; secret: boolean } | null {
     const m = line.match(/^(\t*)- prompt:\s+(secret\s+)?\{([A-Za-z_][A-Za-z0-9_]*)\}\s+(.+)$/i);
     if (!m) { return null; }
@@ -364,7 +363,6 @@ export function detectParallelFlag(body: string): { body: string; parallel: bool
     return { body: body.slice(m[0].length), parallel: true };
 }
 
-// ---- NEW: Retry Directive ----
 export function detectRetryFlag(body: string): { body: string; retryCount: number; retryInterval: number } {
     const m = body.match(/^\[retry:\s*(\d+)(?:\s*,\s*(?:interval:)?\s*(\d+)(s|ms)?)?\]\s*/i);
     if (!m) { return { body, retryCount: 0, retryInterval: 0 }; }
@@ -407,6 +405,15 @@ export function applyTemplate(cmd: string, cfg: LC4RIConfig, profile: string): s
     if (profile && cfg.profiles[profile]) { return cfg.profiles[profile].replace('{COMMAND}', cmd); }
     if (cfg.template && cfg.template[process.platform]) { return cfg.template[process.platform].replace('{COMMAND}', cmd); }
     return cmd;
+}
+
+function generateRandomAlpha(length: number): string {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
 }
 
 // =============================================================================
@@ -757,7 +764,85 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
             continue;
         }
 
-        // NEW: prompt directive support
+        // NEW: Code Block parsing for Execution (bash/zsh/sh) and Write (yaml/conf/json)
+        const fenceExecMatch = line.match(/^([ \t]*)(`{3,}|~{3,})\s*(bash|zsh|sh|yaml|conf|json)\b(?:\s+(.+))?\s*$/i);
+        if (fenceExecMatch) {
+            const depthMatch = fenceExecMatch[1];
+            let depth = 0;
+            for (const c of depthMatch) { if (c === '\t') depth++; }
+            
+            const lang = fenceExecMatch[3].toLowerCase();
+            const argPath = fenceExecMatch[4]?.trim();
+
+            const blk = collectFencedBlock(lines, i);
+            if (blk.content !== null) {
+                if (['yaml', 'conf', 'json'].includes(lang)) {
+                    // --- Feature 2: yaml/conf/json -> write file ---
+                    const isRandom = !argPath;
+                    const ext = lang === 'conf' ? 'conf' : lang;
+                    const randomName = generateRandomAlpha(8);
+                    const filename = argPath || `${randomName}.${ext}`;
+                    const resolved = path.isAbsolute(filename) ? filename : path.join(getCurrentCwd(), filename);
+
+                    ctx.execFlag = true;
+                    const header = `\n[ write: ${filename}${isRandom ? ' (auto-generated)' : ''} ] ${getDate()}\n`;
+
+                    if (ctx.dryRun) {
+                        const n = blk.content.split('\n').length;
+                        ctx.consoles += header + `[dry-run] would write ${n} line(s) to ${resolved}\n`;
+                    } else {
+                        try {
+                            fs.mkdirSync(path.dirname(resolved), { recursive: true });
+                            fs.writeFileSync(resolved, blk.content + '\n', 'utf8');
+                            const n = blk.content.split('\n').length;
+                            ctx.consoles += header + `wrote ${n} line(s) to ${resolved}\n`;
+                            pushReport({ command: `write: ${filename}`, rendered: `write: ${filename}`, output: `wrote ${n} line(s)`, code: 0, ts: getDate(), ok: true });
+                        } catch (err) {
+                            ctx.consoles += header + `error: ${String(err)}\n`;
+                        }
+                    }
+                    ctx.execCount = depth + 1;
+                } else {
+                    // --- Feature 1: bash/zsh/sh -> execute ---
+                    ctx.execFlag = true;
+                    const blockLines = blk.content.split(/\r?\n/);
+                    const logicalCommands: string[] = [];
+                    for (let b = 0; b < blockLines.length; b++) {
+                        let cmd = blockLines[b];
+                        // Handle line continuation with backslash
+                        while (cmd.match(/\\\s*$/) && b + 1 < blockLines.length) {
+                            cmd = cmd.replace(/\\\s*$/, '') + blockLines[b + 1];
+                            b++;
+                        }
+                        const trimmed = cmd.trim();
+                        if (trimmed.length > 0 && !trimmed.startsWith('#')) {
+                            logicalCommands.push(trimmed);
+                        }
+                    }
+
+                    ctx.execCount = depth + 1; // Mark block initiation success
+                    for (const rawCmd of logicalCommands) {
+                        if (ctx.token.isCancellationRequested) break;
+                        
+                        let finalCmd = substituteVars(rawCmd, ctx.vars);
+                        finalCmd = applyChangeWord(finalCmd, ctx.cfg.changeWord);
+                        
+                        // Pass with dummy list marker "- " so runOneCommand handles it normally
+                        await runOneCommand(`- ${finalCmd}`, 0, ctx);
+                        
+                        // If execution fails, stop processing the rest of the block
+                        if (ctx.vars.status !== 0) {
+                            ctx.execCount = 0;
+                            break;
+                        }
+                    }
+                }
+                i += blk.consumed - 1;
+                ctx.nowLine += blk.consumed - 1;
+                continue;
+            }
+        }
+
         const promptDir = parsePromptDirective(line);
         if (promptDir !== null) {
             const { depth, bindName, message, secret } = promptDir;
@@ -876,7 +961,7 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
     }
 }
 
-function isFenceLine(s: string): boolean { return /^```/.test(s); }
+function isFenceLine(s: string): boolean { return /^```\s*$/.test(s); }
 
 async function handleNumberedAssignment(hit: { idx: string; body: string }, ctx: RunContext): Promise<void> {
     const { body, bindName } = extractBinding(hit.body);
@@ -938,7 +1023,6 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
     const rawBody = rawLine.replace(stripRe, '');
     const { body: noParallelBody } = detectParallelFlag(rawBody);
     
-    // NEW: detect retry directives [retry: 5, 2s]
     const { body: noRetryBody, retryCount, retryInterval } = detectRetryFlag(noParallelBody);
     const { body: cleanBody, bindName } = extractBinding(noRetryBody);
 
@@ -1017,7 +1101,6 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
         return;
     }
 
-    // NEW: execute with retries and live streaming support
     let attempts = 0;
     let maxAttempts = retryCount > 0 ? retryCount + 1 : 1;
     let res: ExecResult | null = null;
@@ -1030,7 +1113,6 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
         }
         ctx.progress.report({ message: `${finalCmd}${retryCount > 0 ? ` (try ${attempts + 1})` : ''}` });
         
-        // Output streams real-time into the markdown consoles object
         res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(),
             (chunk, isStderr) => {
                 const text = isStderr ? `[stderr] ${chunk}` : chunk;
@@ -1268,9 +1350,9 @@ async function clearOutputBlock(): Promise<void> {
     const doc = editor.document;
     const cursor = editor.selection.active.line;
     let start = -1, end = -1;
-    for (let i = cursor; i < doc.lineCount; i++) { if (/^```/.test(doc.lineAt(i).text)) { start = i; break; } }
+    for (let i = cursor; i < doc.lineCount; i++) { if (/^```\s*$/.test(doc.lineAt(i).text)) { start = i; break; } }
     if (start === -1) { return; }
-    for (let i = start + 1; i < doc.lineCount; i++) { if (/^```/.test(doc.lineAt(i).text)) { end = i; break; } }
+    for (let i = start + 1; i < doc.lineCount; i++) { if (/^```\s*$/.test(doc.lineAt(i).text)) { end = i; break; } }
     if (end === -1) { return; }
     await editor.edit(b => b.replace(new vscode.Range(new vscode.Position(start, 0), new vscode.Position(end, doc.lineAt(end).text.length)), '```\n```'));
 }

@@ -626,6 +626,40 @@ Streaming is always active. There are no extra settings to enable.
 | `collapsible` output format | The `<details>` wrapper is written on the first flush and updated in-place on subsequent flushes |
 | `toterminal` | Output is sent to the terminal and also streamed back into the document |
 
+# v1.3: Code Block Execution and Auto-Write
+
+## 1. Execute bash/sh/zsh blocks sequentially
+You can directly execute the contents of a fenced code block without needing to prefix each line with - . This is extremely convenient for longer shell scripts.
+
+Variables ({VAR_NAME}) inside the block are resolved, and line-continuations (\) are automatically supported. Execution stops immediately if any command within the block fails.
+
+Markdown
+```bash
+echo "Installing dependencies..."
+curl -sL [http://api.local/tarball.gz](http://api.local/tarball.gz) | tar -xz \
+    -C /opt/app \
+    --strip-components=1
+echo "Finished!"
+```
+## 2. Auto-write yaml/conf/json blocks
+Fenced code blocks for configuration files (yaml, conf, json) are automatically detected and saved to disk.
+
+Markdown
+```yaml config/settings.yml
+database:
+  host: {DB_HOST}
+  port: 5432
+```
+If you omit the filename from the fence definition, code-lc4ri will automatically generate a unique alphabetic filename (e.g. gHJkLmNa.yaml) and write the output block so you can trace what file was generated.
+
+Markdown
+```json
+{
+  "status": "ready",
+  "enabled": true
+}
+```
+
 # LICENSE
 
 MIT License
