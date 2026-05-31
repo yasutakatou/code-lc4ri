@@ -512,6 +512,120 @@ Write the contents of a fenced code block to a file directly from a runbook:
 
 <br>
 
+<br>
+
+# v1.2: New features
+
+## 1. Input / Prompt Directive
+
+Pause execution and ask the user to type a value, storing the answer in a named variable.
+
+```markdown
+- prompt: {TARGET_HOST} Enter the hostname to connect to
+- ssh {TARGET_HOST} uptime
+```
+
+The cursor-position AND-chain rules apply — a `prompt:` at an indented level only fires when the parent command succeeded.
+
+### Syntax
+
+```
+- prompt: {VARIABLE_NAME} <message shown to the user>
+```
+
+| Option | Example | Description |
+|---|---|---|
+| _(none)_ | `- prompt: {NAME} Enter name` | Shows an input box; typed text is stored in `{NAME}` |
+| `secret` | `- prompt: secret {PASS} Enter password` | Input is masked (password field) |
+
+If the user dismisses the dialog without entering a value, the AND-chain is broken and `(cancelled by user)` is recorded in the output block.
+
+### Dry-run behaviour
+
+In dry-run mode no dialog appears. The output block records `[dry-run] would prompt: <message>` so you can verify the variable name and prompt text without side effects.
+
+### Example
+
+```markdown
+1. hostname → {host}
+- prompt: {DEPLOY_ENV} Deploy to which environment? (staging/prod)
+- echo deploying {host} → {DEPLOY_ENV}
+```
+
+---
+
+## 2. Retry / Wait Directive
+
+Prefix any list command with `[retry: N]` to re-run it up to N additional times if it exits with a non-zero code.
+
+### Syntax
+
+```
+- [retry: <count>] command
+- [retry: <count>, <interval>] command
+- [retry: <count>, interval: <interval>] command
+```
+
+| Part | Example | Description |
+|---|---|---|
+| `count` | `[retry: 5]` | Maximum number of **retries** (total attempts = count + 1) |
+| `interval` (ms) | `[retry: 3, 500]` | Wait 500 ms between each retry |
+| `interval` (s)  | `[retry: 3, 2s]`  | Wait 2 seconds between each retry |
+
+The interval unit suffix is optional — a bare number is treated as milliseconds.
+
+### Behaviour
+
+- If the command **succeeds** (exit 0) on any attempt, retrying stops immediately and the AND-chain continues normally.
+- If all attempts fail, the AND-chain is broken as usual.
+- Each wait period is recorded in the output block as `[retry N/M wait Xms...]` so the log is self-explanatory.
+- The progress toast shows `command (try N)` during retries.
+- Combining with `[parallel]` is supported — add both prefixes in any order.
+
+### Examples
+
+```markdown
+- [retry: 3] curl -sf http://api.local/health
+    - echo service is up
+
+- [retry: 5, 2s] kubectl rollout status deployment/app
+```
+
+Retry until a health-check passes, with a 2-second pause between attempts:
+
+```markdown
+- [retry: 10, interval: 2s] curl -sf http://db:5432/ready
+    - echo database is ready
+    - [retry: 3, 500] psql -c "SELECT 1"
+```
+
+---
+
+## 3. Real-time Output Streaming
+
+Command output is written into the Markdown document **as it arrives**, rather than after the command finishes. This is especially useful for long-running commands like log tails, build scripts, or test runners.
+
+### How it works
+
+- A 200 ms interval timer flushes accumulated stdout/stderr chunks into the nearest output code block below the command.
+- The output block is created on the first flush if it does not already exist.
+- Subsequent flushes replace the existing block in-place rather than appending, so the document stays tidy.
+- A final sync runs after `runLines` completes to ensure the last chunk is always written.
+- `[stderr]` lines are prefixed so they are visually distinguishable from stdout.
+
+### No configuration required
+
+Streaming is always active. There are no extra settings to enable.
+
+### Interaction with other features
+
+| Feature | Behaviour with streaming |
+|---|---|
+| Retry | Each attempt's output is appended live; the `[retry N/M wait Xms...]` marker appears in real-time before the next attempt starts |
+| Cancel | Clicking **Cancel** in the progress toast stops the child process; whatever has already been streamed remains in the document |
+| `collapsible` output format | The `<details>` wrapper is written on the first flush and updated in-place on subsequent flushes |
+| `toterminal` | Output is sent to the terminal and also streamed back into the document |
+
 # LICENSE
 
 MIT License
@@ -521,3 +635,4 @@ MIT License
 - [yasutakatou](https://github.com/yasutakatou)
 
 <!-- CREATED_BY_LEADYOU_README_GENERATOR -->
+
