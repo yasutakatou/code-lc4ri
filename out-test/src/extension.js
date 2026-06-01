@@ -47,8 +47,10 @@ exports.extractBinding = extractBinding;
 exports.parseAssert = parseAssert;
 exports.parseEnvFile = parseEnvFile;
 exports.parseWriteDirective = parseWriteDirective;
+exports.parsePromptDirective = parsePromptDirective;
 exports.collectFencedBlock = collectFencedBlock;
 exports.detectParallelFlag = detectParallelFlag;
+exports.detectRetryFlag = detectRetryFlag;
 exports.substituteVars = substituteVars;
 exports.applyChangeWord = applyChangeWord;
 exports.applyTemplate = applyTemplate;
@@ -65,18 +67,8 @@ exports.isPureCdCommand = isPureCdCommand;
 // =============================================================================
 // code-lc4ri — Markdown + LC4RI for VS Code
 // -----------------------------------------------------------------------------
-// v1.0: large refactor.
-//   1. Async execution + progress + cancel (replaces execSync).
-//   2. CodeLens "Run" / "Dry-run" on every executable list line.
-//   3. settings.json (VS Code configuration) with backward-compat for the
-//      legacy ~/.code-lc4ri/config.json file.
-//   4. Workspace-Trust aware + dangerous-command guard / allow / deny lists.
-//   5. Named variables, {$PREV} / {$STATUS} / {$DATE}, "→ {name}" binding,
-//      `- assert: ...` directives.
-//   6. Status bar profile switcher (extends the OS-keyed `template`).
-//   7. Pure helpers are `export`ed so they can be unit-tested.
-//   8. HTML/Markdown report export, plus a minimal CLI entry point
-//      (bin/code-lc4ri) that reuses the same parser.
+// v1.4: Added ① Variable Inspector Panel, ② Execution History Browser,
+//        ③ Collapsible Output with Search, ④ Execution Timeline (waterfall).
 // =============================================================================
 const vscode = __importStar(require("vscode"));
 const child_process_1 = require("child_process");
@@ -89,38 +81,26 @@ const os = __importStar(require("os"));
 // -----------------------------------------------------------------------------
 let outputChannel;
 let statusBarItem;
-let activeProfile = ''; // empty string ⇒ legacy `template` is used
+let activeProfile = '';
 const runningProcs = new Set();
 const reportEntries = [];
 let codeLensEmitter;
-/**
- * Tracked current working directory across command executions.
- * `undefined` means "not yet initialised"; will be set on first run to the
- * workspace folder (or process.cwd() as a fallback).  Each subsequent `cd`
- * command updates this value so the next command starts from the same place.
- */
 let currentCwd = undefined;
-/**
- * Tracked environment variables set via `export VAR=value` commands.
- * These are merged with `process.env` for every subsequent command execution,
- * so that variables exported in one step are visible in later steps — just
- * as they would be in an interactive shell session.
- */
 let currentEnv = {};
-/**
- * Persistent named and numbered variables set via `cmd → {NAME}` or
- * `1. cmd → {NAME}` bindings.  These survive horizontal-rule boundaries
- * and across multiple `runFromCursor` invocations, mirroring the behaviour
- * of `currentCwd` and `currentEnv`.
- *
- * `$PREV` and `$STATUS` are intentionally NOT persisted here — they reflect
- * the immediately preceding command result and would be misleading if carried
- * across unrelated executions.
- */
 let persistentVars = {
     num: {},
     named: {}
 };
+// ① Variable Inspector Panel
+let varInspectorPanel;
+let varInspectorEmitter;
+// ② Execution History Browser
+let historyPanel;
+const historySessions = [];
+let currentSession;
+const HISTORY_FILE_NAME = '.lc4ri-history.json';
+// ④ Timeline: parallel group counter
+let parallelGroupCounter = 0;
 // -----------------------------------------------------------------------------
 // Defaults
 // -----------------------------------------------------------------------------
@@ -130,7 +110,7 @@ exports.DEFAULT_DANGEROUS_PATTERNS = [
     '\\bmkfs\\.',
     '\\bshutdown\\b',
     '\\breboot\\b',
-    ':\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:', // fork bomb
+    ':\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:',
     'curl\\s+[^|]+\\|\\s*(?:sh|bash)',
     'wget\\s+[^|]+\\|\\s*(?:sh|bash)',
     '>\\s*/dev/sd[a-z]'
@@ -156,15 +136,14 @@ const DEFAULT_CONFIG = {
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('code-lc4ri');
     outputChannel.appendLine(`[lc4ri] activated at ${new Date().toISOString()}`);
-    // ---------- Status bar profile picker --------------------------------
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.command = 'extension.lc4ri.switchProfile';
     statusBarItem.tooltip = 'code-lc4ri: switch execution profile';
     updateStatusBar();
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
-    // ---------- CodeLens --------------------------------------------------
     codeLensEmitter = new vscode.EventEmitter();
+    varInspectorEmitter = new vscode.EventEmitter();
     const codeLensProvider = new LC4RICodeLensProvider(codeLensEmitter.event);
     context.subscriptions.push(vscode.languages.registerCodeLensProvider({ language: 'markdown', scheme: 'file' }, codeLensProvider), vscode.languages.registerCodeLensProvider({ language: 'markdown', scheme: 'untitled' }, codeLensProvider));
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
@@ -173,10 +152,17 @@ function activate(context) {
             updateStatusBar();
         }
     }));
-    // ---------- Commands --------------------------------------------------
-    context.subscriptions.push(vscode.commands.registerCommand('extension.lc4ri', (_arg) => runFromCursor({ dryRun: false })), vscode.commands.registerCommand('extension.lc4ri.dryRun', () => runFromCursor({ dryRun: true })), vscode.commands.registerCommand('extension.lc4ri.runLine', (uri, line, dryRun) => runSingleLine(uri, line, dryRun === true)), vscode.commands.registerCommand('extension.lc4ri.cancel', cancelAll), vscode.commands.registerCommand('extension.lc4ri.switchProfile', switchProfile), vscode.commands.registerCommand('extension.lc4ri.clearOutput', clearOutputBlock), vscode.commands.registerCommand('extension.lc4ri.exportReport', exportReport), vscode.commands.registerCommand('extension.lc4ri.exportReportMd', () => exportReport('md')), vscode.commands.registerCommand('extension.lc4ri.exportReportHtml', () => exportReport('html')));
-    // Ensure the legacy config file is created on first run, like the
-    // previous version did.
+    // Load persisted history on activation
+    loadHistory(context);
+    context.subscriptions.push(vscode.commands.registerCommand('extension.lc4ri', (_arg) => runFromCursor({ dryRun: false })), vscode.commands.registerCommand('extension.lc4ri.dryRun', () => runFromCursor({ dryRun: true })), vscode.commands.registerCommand('extension.lc4ri.runLine', (uri, line, dryRun) => runSingleLine(uri, line, dryRun === true)), vscode.commands.registerCommand('extension.lc4ri.cancel', cancelAll), vscode.commands.registerCommand('extension.lc4ri.switchProfile', switchProfile), vscode.commands.registerCommand('extension.lc4ri.clearOutput', clearOutputBlock), vscode.commands.registerCommand('extension.lc4ri.exportReport', exportReport), vscode.commands.registerCommand('extension.lc4ri.exportReportMd', () => exportReport('md')), vscode.commands.registerCommand('extension.lc4ri.exportReportHtml', () => exportReport('html')), 
+    // ① Variable Inspector
+    vscode.commands.registerCommand('extension.lc4ri.showVarInspector', () => showVarInspector(context)), 
+    // ② History Browser
+    vscode.commands.registerCommand('extension.lc4ri.showHistory', () => showHistoryBrowser(context)), vscode.commands.registerCommand('extension.lc4ri.clearHistory', () => clearHistory(context)), 
+    // ③ Output block search
+    vscode.commands.registerCommand('extension.lc4ri.searchOutput', searchOutputBlock), 
+    // ④ Timeline
+    vscode.commands.registerCommand('extension.lc4ri.showTimeline', () => showTimeline(context)));
     try {
         ensureLegacyConfigFile();
     }
@@ -189,11 +175,14 @@ function deactivate() {
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.dispose();
     statusBarItem === null || statusBarItem === void 0 ? void 0 : statusBarItem.dispose();
     codeLensEmitter === null || codeLensEmitter === void 0 ? void 0 : codeLensEmitter.dispose();
+    varInspectorEmitter === null || varInspectorEmitter === void 0 ? void 0 : varInspectorEmitter.dispose();
+    varInspectorPanel === null || varInspectorPanel === void 0 ? void 0 : varInspectorPanel.dispose();
+    historyPanel === null || historyPanel === void 0 ? void 0 : historyPanel.dispose();
     currentEnv = {};
     persistentVars = { num: {}, named: {} };
 }
 // =============================================================================
-// Configuration loading (settings.json first, legacy file fallback)
+// Configuration loading
 // =============================================================================
 function readConfig() {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
@@ -217,17 +206,15 @@ function readConfig() {
     return merged;
 }
 function readLegacyConfig() {
+    var _a;
     try {
         const configPath = legacyConfigPath();
         if (!fs.existsSync(configPath)) {
             return {};
         }
-        const raw = fs.readFileSync(configPath, 'utf8');
-        const obj = JSON.parse(raw);
-        return obj !== null && obj !== void 0 ? obj : {};
+        return (_a = JSON.parse(fs.readFileSync(configPath, 'utf8'))) !== null && _a !== void 0 ? _a : {};
     }
     catch (err) {
-        outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] legacy config parse error: ${String(err)} — using defaults`);
         return {};
     }
 }
@@ -242,14 +229,7 @@ function ensureLegacyConfigFile() {
         fs.mkdirSync(dir, { recursive: true });
     }
     if (!fs.existsSync(file)) {
-        fs.writeFileSync(file, JSON.stringify({
-            timeout: DEFAULT_CONFIG.timeout,
-            template: {},
-            profiles: {},
-            changeWord: {},
-            toutf8: true,
-            toterminal: false
-        }, null, 2), 'utf8');
+        fs.writeFileSync(file, JSON.stringify({ timeout: DEFAULT_CONFIG.timeout, template: {}, profiles: {}, changeWord: {}, toutf8: true, toterminal: false }, null, 2), 'utf8');
     }
 }
 function legacyConfigPath() {
@@ -257,9 +237,7 @@ function legacyConfigPath() {
     if (!home) {
         return '';
     }
-    return process.platform === 'win32'
-        ? path.join(home, '.code-lc4ri', 'config.json')
-        : path.join(home, '.code-lc4ri', 'config.json');
+    return path.join(home, '.code-lc4ri', 'config.json');
 }
 function safeHome() {
     try {
@@ -268,21 +246,18 @@ function safeHome() {
             return h;
         }
     }
-    catch (_) { /* ignore */ }
-    // last-resort: the previous behaviour of echoing the env var
+    catch (_) { }
     try {
         const com = process.platform === 'win32' ? 'echo %USERPROFILE%' : 'echo $HOME';
-        const out = (0, child_process_1.execSync)(com).toString().replace(/\r\n|\r|\n/, '');
-        return out;
+        return (0, child_process_1.execSync)(com).toString().replace(/\r\n|\r|\n/, '');
     }
     catch (_) {
         return '';
     }
 }
 // =============================================================================
-// Parsing helpers (pure, exported for tests)
+// Parsing helpers
 // =============================================================================
-/** Match a "- " at depth `cnt` (0 = top-level, 1 = one tab in, ...) */
 function regTab(cnt) {
     let s = '^';
     for (let i = 0; i < cnt; i++) {
@@ -290,43 +265,16 @@ function regTab(cnt) {
     }
     return s + '- ';
 }
-/**
- * Default number of spaces that equal one indentation level (= 1 tab).
- * Used by {@link normalizeIndent}.  4 matches VS Code's default `editor.tabSize`
- * and the most common Markdown authoring conventions.
- */
 exports.DEFAULT_INDENT_SPACES = 2;
-/**
- * Normalise the leading whitespace of a line so that the rest of the parser
- * (which is tab-aware via {@link regTab}) can treat space-indented Markdown
- * the same way as tab-indented Markdown.
- *
- *   "    - foo"  → "\t- foo"    (4 spaces = 1 level)
- *   "  - foo"    → "\t- foo"    (any non-empty indent = at least 1 level)
- *   "        - foo" → "\t\t- foo"  (8 spaces = 2 levels)
- *   "\t- foo"    → "\t- foo"    (already tabbed — unchanged)
- *   "\t  - foo"  → "\t\t- foo"  (mixed)
- *
- * This is what makes the AND-chain example
- *
- *     - CommandA
- *         - RouteA
- *     - RouteB
- *
- * behave the same as if the inner item had been indented with a tab.
- */
 function normalizeIndent(line, tabWidth = exports.DEFAULT_INDENT_SPACES) {
     const m = line.match(/^([ \t]*)(.*)$/);
     if (!m) {
         return line;
     }
-    const ws = m[1];
-    const rest = m[2];
+    const ws = m[1], rest = m[2];
     if (ws.length === 0) {
         return line;
     }
-    // Resolve every char to a logical column count.  A tab snaps the column to
-    // the next multiple of `tabWidth`, which matches how text editors render.
     let col = 0;
     for (const c of ws) {
         if (c === '\t') {
@@ -339,40 +287,16 @@ function normalizeIndent(line, tabWidth = exports.DEFAULT_INDENT_SPACES) {
     if (col === 0) {
         return rest;
     }
-    const tabs = Math.ceil(col / tabWidth);
-    return '\t'.repeat(tabs) + rest;
+    return '\t'.repeat(Math.ceil(col / tabWidth)) + rest;
 }
-/** Markdown horizontal rule? (***, ---, * * *, ...) */
 function horizonCheck(line) {
     return /^(?:\*\s?){3,}\s*$/.test(line) || /^(?:-\s?){3,}\s*$/.test(line);
 }
-/**
- * Unix-style backslash line continuation.
- *
- *   ls \
- *    -la
- *
- * is treated as a single logical command `ls -la`.  Starting from index
- * `startIdx`, this scans forward while the current line ends in `\` (with
- * optional trailing whitespace), strips that trailing backslash, joins the
- * next line (with its leading whitespace removed) using a single space, and
- * returns the merged line plus the number of source lines that were consumed.
- *
- * For lines that do not end with `\`, `consumed` is 1 and `joined` is the
- * original line unchanged.
- */
 function joinContinuedLines(lines, startIdx) {
     var _a, _b;
     let line = (_a = lines[startIdx]) !== null && _a !== void 0 ? _a : '';
     let consumed = 1;
-    // A trailing backslash counts as a continuation marker.  Even number of
-    // trailing backslashes (\\, \\\\) means the user really intended literal
-    // backslashes, so we only treat *odd*-count trailing backslashes as a
-    // continuation.
     while (hasContinuationBackslash(line) && startIdx + consumed < lines.length) {
-        // Strip the trailing "\" *and* any whitespace that immediately
-        // precedes it, so that joining always produces a single space
-        // between the two halves.
         const stripped = line.replace(/\s*\\\s*$/, '');
         const next = ((_b = lines[startIdx + consumed]) !== null && _b !== void 0 ? _b : '').replace(/^\s+/, '');
         line = stripped + ' ' + next;
@@ -382,15 +306,8 @@ function joinContinuedLines(lines, startIdx) {
 }
 function hasContinuationBackslash(line) {
     const m = line.match(/(\\+)\s*$/);
-    if (!m) {
-        return false;
-    }
-    return m[1].length % 2 === 1;
+    return !!m && m[1].length % 2 === 1;
 }
-/**
- * Detect a list-command line, return its tab depth and command body
- * (without the leading "- "). Returns null when this is not a list line.
- */
 function detectListCommand(line) {
     const m = line.match(/^(\t*)- (.*)$/);
     if (!m) {
@@ -398,7 +315,6 @@ function detectListCommand(line) {
     }
     return { depth: m[1].length, body: m[2] };
 }
-/** Detect "N. command" where N is 1-9. */
 function detectNumbered(line) {
     const m = line.match(/^([1-9])\.\s+(.*)$/);
     if (!m) {
@@ -406,10 +322,6 @@ function detectNumbered(line) {
     }
     return { idx: m[1], body: m[2] };
 }
-/**
- * A trailing " → {name}" (or " -> {name}") binds the command's output to a
- * named variable. Return the body without the binder + the captured name.
- */
 function extractBinding(body) {
     const m = body.match(/\s*(?:→|->)\s*\{([A-Za-z_][A-Za-z0-9_]*)\}\s*$/);
     if (!m) {
@@ -417,7 +329,6 @@ function extractBinding(body) {
     }
     return { body: body.slice(0, m.index), bindName: m[1] };
 }
-/** `assert: contains "ok"` / `assert: status == 0` / `assert: regex /.../` */
 function parseAssert(body) {
     var _a, _b, _c, _d;
     const m = body.match(/^assert\s*:\s*(.+)$/i);
@@ -443,7 +354,6 @@ function parseAssert(body) {
     }
     return null;
 }
-/** Parse a .env-style file and return key → value pairs. */
 function parseEnvFile(content) {
     const result = {};
     for (const rawLine of content.split(/\r?\n/)) {
@@ -457,8 +367,7 @@ function parseEnvFile(content) {
         }
         const key = line.slice(0, eq).trim();
         let val = line.slice(eq + 1).trim();
-        if ((val.startsWith('"') && val.endsWith('"')) ||
-            (val.startsWith("'") && val.endsWith("'"))) {
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
             val = val.slice(1, -1);
         }
         if (key) {
@@ -467,10 +376,6 @@ function parseEnvFile(content) {
     }
     return result;
 }
-/**
- * Detect a "- write: path" directive line.
- * Returns the tab depth and file path (variables already substituted by the caller).
- */
 function parseWriteDirective(line) {
     const m = line.match(/^(\t*)- write:\s+(.+)$/i);
     if (!m) {
@@ -478,13 +383,13 @@ function parseWriteDirective(line) {
     }
     return { depth: m[1].length, filePath: m[2].trim() };
 }
-/**
- * Collect content from a fenced code block (``` or ~~~) starting at `startIdx`.
- * Skips blank lines before the opening fence.
- * Strips up to `fenceIndent` spaces of common leading indentation from each content line.
- * Returns the content string and how many lines were consumed (opening fence through closing fence).
- * Returns `{ content: null, consumed: 0 }` when no valid fence block is found.
- */
+function parsePromptDirective(line) {
+    const m = line.match(/^(\t*)- prompt:\s+(secret\s+)?\{([A-Za-z_][A-Za-z0-9_]*)\}\s+(.+)$/i);
+    if (!m) {
+        return null;
+    }
+    return { depth: m[1].length, secret: !!m[2], bindName: m[3], message: m[4].trim() };
+}
 function collectFencedBlock(lines, startIdx) {
     var _a, _b;
     let idx = startIdx;
@@ -515,7 +420,6 @@ function collectFencedBlock(lines, startIdx) {
     }
     return { content: null, consumed: 0 };
 }
-/** Detect the `[parallel]` flag prefix on a list-command body. */
 function detectParallelFlag(body) {
     const m = body.match(/^\[parallel\]\s*/i);
     if (!m) {
@@ -523,7 +427,20 @@ function detectParallelFlag(body) {
     }
     return { body: body.slice(m[0].length), parallel: true };
 }
-/** Replace {1}-{9}, {name}, and built-ins like {$PREV}. */
+function detectRetryFlag(body) {
+    const m = body.match(/^\[retry:\s*(\d+)(?:\s*,\s*(?:interval:)?\s*(\d+)(s|ms)?)?\]\s*/i);
+    if (!m) {
+        return { body, retryCount: 0, retryInterval: 0 };
+    }
+    let interval = 0;
+    if (m[2]) {
+        interval = parseInt(m[2], 10);
+        if (m[3] === 's') {
+            interval *= 1000;
+        }
+    }
+    return { body: body.slice(m[0].length), retryCount: parseInt(m[1], 10), retryInterval: interval };
+}
 function substituteVars(line, vars) {
     return line.replace(/\{([^{}\s]+)\}/g, (whole, key) => {
         if (key.startsWith('$')) {
@@ -546,19 +463,13 @@ function substituteVars(line, vars) {
         return whole;
     });
 }
-/** Apply changeWord substitution map. */
 function applyChangeWord(line, map) {
     for (const k of Object.keys(map)) {
-        // global replacement so multiple #HOME# in one line are all replaced
         const safe = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         line = line.replace(new RegExp(safe, 'g'), map[k]);
     }
     return line;
 }
-/**
- * Wrap the resolved command with the chosen profile / OS template.
- * Active profile takes precedence; otherwise fall back to per-OS template.
- */
 function applyTemplate(cmd, cfg, profile) {
     if (profile && cfg.profiles[profile]) {
         return cfg.profiles[profile].replace('{COMMAND}', cmd);
@@ -568,8 +479,16 @@ function applyTemplate(cmd, cfg, profile) {
     }
     return cmd;
 }
+function generateRandomAlpha(length) {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
 // =============================================================================
-// Security (allow / deny / dangerous patterns)
+// Security
 // =============================================================================
 function matchesAny(s, patterns) {
     for (const p of patterns) {
@@ -578,10 +497,7 @@ function matchesAny(s, patterns) {
                 return p;
             }
         }
-        catch (_) {
-            // bad pattern — ignore but log
-            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] bad regex skipped: ${p}`);
-        }
+        catch (_) { }
     }
     return null;
 }
@@ -607,92 +523,62 @@ async function confirmDangerous(cmd, pattern) {
     return pick === 'Run';
 }
 // =============================================================================
-// Async exec (spawn-based) with timeout and cancellation
+// Async exec (spawn-based)
 // =============================================================================
 function execAsync(cmd, cfg, token, cwd, onData, env) {
     return new Promise((resolve) => {
         var _a, _b, _c;
         const shellCmd = (_a = cfg.shell) !== null && _a !== void 0 ? _a : (process.platform === 'win32' ? true : '/bin/sh');
-        // If cwd is provided but the directory doesn't exist, spawn will throw
-        // synchronously and emit an `error` event.  We guard with fs.existsSync
-        // to fall back to the parent process's cwd instead.
         let effectiveCwd = cwd;
         if (effectiveCwd && !fs.existsSync(effectiveCwd)) {
-            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] tracked cwd "${effectiveCwd}" does not exist — falling back to process cwd`);
             effectiveCwd = undefined;
         }
-        // Merge tracked exported variables with process.env so that variables
-        // set by earlier `export` commands are visible to this child process.
-        const effectiveEnv = env && Object.keys(env).length > 0
-            ? { ...process.env, ...env }
-            : undefined;
+        const effectiveEnv = env && Object.keys(env).length > 0 ? { ...process.env, ...env } : undefined;
         const child = (0, child_process_1.spawn)(cmd, {
             shell: shellCmd,
-            windowsHide: true,
-            cwd: effectiveCwd,
-            ...(effectiveEnv ? { env: effectiveEnv } : {})
+            windowsHide: true, cwd: effectiveCwd, ...(effectiveEnv ? { env: effectiveEnv } : {})
         });
         runningProcs.add(child);
-        let stdoutBuf = Buffer.alloc(0);
-        let stderrBuf = Buffer.alloc(0);
-        let timedOut = false;
-        let cancelled = false;
+        let stdoutBuf = Buffer.alloc(0), stderrBuf = Buffer.alloc(0);
+        let timedOut = false, cancelled = false;
         const killAll = (signal = 'SIGTERM') => {
             try {
                 child.kill(signal);
             }
-            catch (_) { /* ignore */ }
+            catch (_) { }
             if (process.platform === 'win32' && child.pid) {
                 try {
                     (0, child_process_1.execSync)(`taskkill /pid ${child.pid} /T /F`);
                 }
-                catch (_) { /* ignore */ }
+                catch (_) { }
             }
         };
-        const timeoutTimer = setTimeout(() => {
-            timedOut = true;
-            killAll('SIGKILL');
-        }, Math.max(0, cfg.timeout));
-        const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => {
-            cancelled = true;
-            killAll('SIGTERM');
-        });
+        const timeoutTimer = setTimeout(() => { timedOut = true; killAll('SIGKILL'); }, Math.max(0, cfg.timeout));
+        const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => { cancelled = true; killAll('SIGTERM'); });
         (_b = child.stdout) === null || _b === void 0 ? void 0 : _b.on('data', (b) => {
             stdoutBuf = Buffer.concat([stdoutBuf, b]);
             if (onData) {
-                onData(b.toString(), false);
+                onData(convToUTF(b, cfg), false);
             }
         });
         (_c = child.stderr) === null || _c === void 0 ? void 0 : _c.on('data', (b) => {
             stderrBuf = Buffer.concat([stderrBuf, b]);
             if (onData) {
-                onData(b.toString(), true);
+                onData(convToUTF(b, cfg), true);
             }
         });
         child.on('close', (code, signal) => {
             clearTimeout(timeoutTimer);
             cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
             runningProcs.delete(child);
-            resolve({
-                stdout: convToUTF(stdoutBuf, cfg),
-                stderr: convToUTF(stderrBuf, cfg),
-                code: code !== null && code !== void 0 ? code : (signal ? 130 : -1),
-                timedOut,
-                cancelled
-            });
+            resolve({ stdout: convToUTF(stdoutBuf, cfg), stderr: convToUTF(stderrBuf, cfg), code: code !== null && code !== void 0 ? code : (signal ? 130 : -1), timedOut, cancelled });
         });
         child.on('error', (err) => {
             var _a;
             clearTimeout(timeoutTimer);
             cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
             runningProcs.delete(child);
-            resolve({
-                stdout: '',
-                stderr: String((_a = err.message) !== null && _a !== void 0 ? _a : err),
-                code: -1,
-                timedOut,
-                cancelled
-            });
+            resolve({ stdout: '', stderr: String((_a = err.message) !== null && _a !== void 0 ? _a : err), code: -1, timedOut, cancelled });
         });
     });
 }
@@ -701,12 +587,7 @@ function convToUTF(buf, cfg) {
         return buf.toString();
     }
     try {
-        const converted = Encoding.convert(buf, {
-            from: 'AUTO',
-            to: 'UNICODE',
-            type: 'string'
-        });
-        return converted;
+        return Encoding.convert(buf, { from: 'AUTO', to: 'UNICODE', type: 'string' });
     }
     catch (_) {
         return buf.toString();
@@ -717,18 +598,14 @@ function cancelAll() {
         try {
             p.kill('SIGTERM');
         }
-        catch (_) { /* ignore */ }
+        catch (_) { }
     }
     runningProcs.clear();
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine('[lc4ri] all running commands cancelled');
 }
 // =============================================================================
-// Current working directory tracking (feature: `cd` persistence)
+// Current working directory / env tracking
 // =============================================================================
-/**
- * Return the current tracked cwd, initialising it on first call from the
- * VS Code workspace folder (or process.cwd() as a fallback).
- */
 function getCurrentCwd() {
     var _a;
     if (currentCwd && fs.existsSync(currentCwd)) {
@@ -739,54 +616,17 @@ function getCurrentCwd() {
     currentCwd = resolved;
     return resolved;
 }
-/** Test-only helper: override the tracked cwd directly. */
-function setCurrentCwd(p) {
-    currentCwd = p;
-}
-/**
- * Return the accumulated environment variables set by `export` commands
- * during this session.  These are merged with `process.env` before each
- * child-process launch so that later commands see earlier exports.
- */
-function getCurrentEnv() {
-    return currentEnv;
-}
-/** Test-only helper: override the tracked env directly. */
-function setCurrentEnv(env) {
-    currentEnv = { ...env };
-}
-/** Return the persistent named/numbered variable store (test helper). */
-function getPersistentVars() {
-    return { num: { ...persistentVars.num }, named: { ...persistentVars.named } };
-}
-/** Override the persistent variable store directly (test helper). */
-function setPersistentVars(v) {
-    persistentVars = { num: { ...v.num }, named: { ...v.named } };
-}
-/**
- * Detect whether the resolved command is "purely" an `export` invocation —
- * meaning it has no shell control operators (&&, ||, ;, |) and consists only
- * of one or more `export VAR=value` (or `export VAR`) assignments.
- *
- * Examples that match:
- *   `export FOO=bar`
- *   `export FOO=bar BAZ=qux`
- *   `export PATH=/usr/local/bin:$PATH`
- *   `export MY_VAR`          (re-export without value — retained as-is)
- *
- * Examples that do NOT match:
- *   `export FOO=bar && echo $FOO`
- *   `echo hi; export X=1`
- *   `unset FOO`
- */
+function setCurrentCwd(p) { currentCwd = p; }
+function getCurrentEnv() { return currentEnv; }
+function setCurrentEnv(env) { currentEnv = { ...env }; }
+function getPersistentVars() { return { num: { ...persistentVars.num }, named: { ...persistentVars.named } }; }
+function setPersistentVars(v) { persistentVars = { num: { ...v.num }, named: { ...v.named } }; }
 function isPureExportCommand(cmd) {
     const trimmed = cmd.trim();
     if (!/^export(\s|$)/.test(trimmed)) {
         return false;
     }
-    // Reject if shell control operators appear outside of quoted strings.
-    let inSingle = false;
-    let inDouble = false;
+    let inSingle = false, inDouble = false;
     for (let i = 0; i < trimmed.length; i++) {
         const c = trimmed[i];
         if (c === '\\') {
@@ -804,36 +644,16 @@ function isPureExportCommand(cmd) {
         if (inSingle || inDouble) {
             continue;
         }
-        if (c === ';' || c === '|' || c === '&') {
-            return false;
-        }
-        if (c === '>' || c === '<') {
+        if (c === ';' || c === '|' || c === '&' || c === '>' || c === '<') {
             return false;
         }
     }
     return true;
 }
-/**
- * Parse a pure `export` command and return the key-value pairs it defines.
- * Uses a real shell (via the existing execAsync infrastructure) to expand
- * variable references like `export PATH=/usr/local/bin:$PATH` correctly.
- *
- * Strategy: run `<exportCmd> && env` in the current environment so that the
- * shell performs all expansions, then diff the output against the process env
- * to find the newly exported names (we only track names that appear explicitly
- * in the export command, not transitive side-effects).
- */
 async function resolveExport(exportCmd, cfg, token) {
     const baseCwd = getCurrentCwd();
-    // Merge already-tracked exports into the environment for the resolution
-    // so that chained exports (`export B=$A` after `export A=1`) work.
-    const baseEnv = Object.keys(currentEnv).length > 0
-        ? { ...process.env, ...currentEnv }
-        : undefined;
-    // We run: <exportCmd> && env
-    // and parse the resulting env dump to find the keys that changed.
+    const baseEnv = Object.keys(currentEnv).length > 0 ? { ...process.env, ...currentEnv } : undefined;
     const probeCmd = `${exportCmd} && env`;
-    // Build a temporary execAsync call that accepts an explicit env map.
     const res = await new Promise((resolve) => {
         var _a, _b, _c;
         const shellCmd = (_a = cfg.shell) !== null && _a !== void 0 ? _a : (process.platform === 'win32' ? true : '/bin/sh');
@@ -841,23 +661,14 @@ async function resolveExport(exportCmd, cfg, token) {
         if (effectiveCwd && !fs.existsSync(effectiveCwd)) {
             effectiveCwd = undefined;
         }
-        const child = (0, child_process_1.spawn)(probeCmd, {
-            shell: shellCmd,
-            windowsHide: true,
-            cwd: effectiveCwd,
-            ...(baseEnv ? { env: baseEnv } : {})
-        });
+        const child = (0, child_process_1.spawn)(probeCmd, { shell: shellCmd, windowsHide: true, cwd: effectiveCwd, ...(baseEnv ? { env: baseEnv } : {}) });
         runningProcs.add(child);
-        let stdoutBuf = Buffer.alloc(0);
-        let stderrBuf = Buffer.alloc(0);
-        let timedOut = false;
-        let cancelled = false;
-        const killAll = (signal = 'SIGTERM') => {
-            try {
-                child.kill(signal);
-            }
-            catch (_) { /* ignore */ }
-        };
+        let stdoutBuf = Buffer.alloc(0), stderrBuf = Buffer.alloc(0);
+        let timedOut = false, cancelled = false;
+        const killAll = (signal = 'SIGTERM') => { try {
+            child.kill(signal);
+        }
+        catch (_) { } };
         const timeoutTimer = setTimeout(() => { timedOut = true; killAll('SIGKILL'); }, Math.max(0, cfg.timeout));
         const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => { cancelled = true; killAll('SIGTERM'); });
         (_b = child.stdout) === null || _b === void 0 ? void 0 : _b.on('data', (b) => { stdoutBuf = Buffer.concat([stdoutBuf, b]); });
@@ -866,8 +677,7 @@ async function resolveExport(exportCmd, cfg, token) {
             clearTimeout(timeoutTimer);
             cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
             runningProcs.delete(child);
-            resolve({ stdout: convToUTF(stdoutBuf, cfg), stderr: convToUTF(stderrBuf, cfg),
-                code: code !== null && code !== void 0 ? code : (signal ? 130 : -1), timedOut, cancelled });
+            resolve({ stdout: convToUTF(stdoutBuf, cfg), stderr: convToUTF(stderrBuf, cfg), code: code !== null && code !== void 0 ? code : (signal ? 130 : -1), timedOut, cancelled });
         });
         child.on('error', (err) => {
             var _a;
@@ -878,20 +688,12 @@ async function resolveExport(exportCmd, cfg, token) {
         });
     });
     if (res.code !== 0 || res.timedOut || res.cancelled) {
-        return {
-            ok: false,
-            vars: {},
-            output: (res.stderr || res.stdout || `export failed (exit ${res.code})`).replace(/\r?\n+$/, '')
-        };
+        return { ok: false, vars: {}, output: (res.stderr || res.stdout || `export failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
     }
-    // Parse the `env` dump.  Lines may be multi-line if a value contains \n,
-    // so we use a simple state machine: a new var starts when we see "KEY=".
     const envDump = {};
-    let currentKey = null;
-    let currentVal = [];
+    let currentKey = null, currentVal = [];
     for (const rawLine of res.stdout.split(/\r?\n/)) {
         const eqIdx = rawLine.indexOf('=');
-        // A valid env key contains only word chars — use that to detect new entries.
         if (eqIdx > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawLine.slice(0, eqIdx))) {
             if (currentKey !== null) {
                 envDump[currentKey] = currentVal.join('\n');
@@ -906,8 +708,6 @@ async function resolveExport(exportCmd, cfg, token) {
     if (currentKey !== null) {
         envDump[currentKey] = currentVal.join('\n');
     }
-    // Extract the variable names explicitly listed in the export command.
-    // Pattern: export [NAME | NAME=...] ...
     const exportedNames = [];
     const body = exportCmd.replace(/^export\s+/, '');
     for (const token of body.split(/\s+/)) {
@@ -922,33 +722,15 @@ async function resolveExport(exportCmd, cfg, token) {
             captured[name] = envDump[name];
         }
     }
-    const summary = Object.entries(captured)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(', ');
+    const summary = Object.entries(captured).map(([k, v]) => `${k}=${v}`).join(', ');
     return { ok: true, vars: captured, output: summary || '(no variables captured)' };
 }
-/**
- * Detect whether the resolved command is "purely" a `cd` invocation —
- * meaning it has no shell control operators (&&, ||, ;, |) and starts with cd.
- * Examples that match:
- *   `cd`
- *   `cd /tmp`
- *   `cd "with spaces"`
- *   `cd ../foo`
- *   `cd -`
- * Examples that do NOT match:
- *   `cd foo && ls`
- *   `cd foo; ls`
- *   `ls && cd foo`
- */
 function isPureCdCommand(cmd) {
     const trimmed = cmd.trim();
     if (!/^cd(\s|$)/.test(trimmed)) {
         return false;
     }
-    // No shell control operators outside of (single/double) quoted strings.
-    let inSingle = false;
-    let inDouble = false;
+    let inSingle = false, inDouble = false;
     for (let i = 0; i < trimmed.length; i++) {
         const c = trimmed[i];
         if (c === '\\') {
@@ -966,20 +748,12 @@ function isPureCdCommand(cmd) {
         if (inSingle || inDouble) {
             continue;
         }
-        if (c === ';' || c === '|' || c === '&') {
-            return false;
-        }
-        if (c === '>' || c === '<') {
+        if (c === ';' || c === '|' || c === '&' || c === '>' || c === '<') {
             return false;
         }
     }
     return true;
 }
-/**
- * Resolve a pure `cd` command using a real shell so that `~`, env vars,
- * `cd -`, relative paths, etc. work exactly as the user expects.  The current
- * tracked cwd is used as the base directory for the resolution.
- */
 async function resolveCd(cdCmd, cfg, token) {
     var _a;
     const baseCwd = getCurrentCwd();
@@ -987,10 +761,7 @@ async function resolveCd(cdCmd, cfg, token) {
     const fullCmd = `${cdCmd} && ${printPwd}`;
     const res = await execAsync(fullCmd, cfg, token, baseCwd, undefined, currentEnv);
     if (res.code !== 0 || res.timedOut || res.cancelled) {
-        return {
-            ok: false,
-            output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '')
-        };
+        return { ok: false, output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
     }
     const lines = res.stdout.replace(/\r?\n+$/, '').split(/\r?\n/);
     const newCwd = (_a = lines[lines.length - 1]) === null || _a === void 0 ? void 0 : _a.trim();
@@ -1017,6 +788,20 @@ async function runFromCursor(opts) {
     const range = new vscode.Selection(startPos, endPos);
     const text = doc.getText(range);
     const lines = text.split(/\r\n|\r|\n/);
+    // ② Start a new history session
+    const sessionId = `session-${Date.now()}`;
+    currentSession = {
+        id: sessionId,
+        startTs: new Date().toISOString(),
+        endTs: '',
+        profile: activeProfile || '(none)',
+        runbookFile: doc.fileName,
+        entries: [],
+        totalOk: 0,
+        totalFail: 0
+    };
+    // ④ Reset parallel group counter for this run
+    parallelGroupCounter = 0;
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: opts.dryRun ? 'code-lc4ri (dry-run)' : 'code-lc4ri',
@@ -1030,6 +815,11 @@ async function runFromCursor(opts) {
             token,
             vars: { num: { ...persistentVars.num }, named: { ...persistentVars.named }, prev: '', status: 0 },
             consoles: '',
+            lastRenderedConsoles: '',
+            outputBlockStartLine: 0,
+            outputBlockEndLine: 0,
+            outputMarkerRange: false,
+            isSyncing: false,
             execCount: 0,
             execFlag: false,
             horizonFlag: -1,
@@ -1038,65 +828,191 @@ async function runFromCursor(opts) {
             nowLine: position.line,
             assertionFailed: false
         };
+        const syncInterval = setInterval(async () => {
+            if (!editor || !doc || ctx.isSyncing)
+                return;
+            ctx.isSyncing = true;
+            try {
+                await syncOutput(editor, doc, ctx);
+            }
+            finally {
+                ctx.isSyncing = false;
+            }
+        }, 200);
         await runLines(lines, ctx);
+        clearInterval(syncInterval);
         if (ctx.execFlag) {
-            await writeBackOutput(editor, doc, ctx);
+            while (ctx.isSyncing) {
+                await new Promise(r => setTimeout(r, 50));
+            }
+            await syncOutput(editor, doc, ctx);
         }
+        // ① Notify variable inspector of updates
+        refreshVarInspector(ctx.vars);
     });
+    // ② Finalize and save session
+    if (currentSession) {
+        currentSession.endTs = new Date().toISOString();
+        currentSession.totalOk = currentSession.entries.filter(e => e.ok).length;
+        currentSession.totalFail = currentSession.entries.filter(e => !e.ok).length;
+        historySessions.unshift(currentSession);
+        // Keep last 50 sessions
+        if (historySessions.length > 50) {
+            historySessions.splice(50);
+        }
+        saveHistory();
+        // Refresh history panel if open
+        if (historyPanel) {
+            postHistoryData();
+        }
+        currentSession = undefined;
+    }
 }
 async function runLines(lines, ctx) {
+    var _a;
     for (let i = 0; i < lines.length; i++) {
         if (ctx.token.isCancellationRequested) {
+            Object.assign(persistentVars.num, ctx.vars.num);
+            Object.assign(persistentVars.named, ctx.vars.named);
             break;
         }
-        // ---- Unix backslash line continuation ----------------------------
-        // If a list/numbered command line ends with "\", merge subsequent
-        // continuation lines into a single logical line before the rest of
-        // the parser sees it.  We must also advance i and ctx.nowLine for the
-        // extra lines we just consumed, because the outer for-loop only
-        // increments them once per iteration.
         const cont = joinContinuedLines(lines, i);
         let line = cont.joined;
         if (cont.consumed > 1) {
             i += cont.consumed - 1;
             ctx.nowLine += cont.consumed - 1;
         }
-        // ---- Normalise indentation (space → tab) -----------------------
-        // The downstream depth check uses tab-aware regexes via regTab(); by
-        // converting leading spaces to tab-equivalent levels here, the same
-        // AND-chain logic applies regardless of whether the author indented
-        // the inner list item with tabs or spaces.
         line = normalizeIndent(line);
         if (horizonCheck(line)) {
             ctx.horizonFlag = ctx.nowLine;
+            Object.assign(persistentVars.num, ctx.vars.num);
+            Object.assign(persistentVars.named, ctx.vars.named);
             break;
         }
-        // Env file directive: # env: <path>
         const envMatch = line.match(/^#\s*env:\s*(.+)$/);
         if (envMatch) {
             const envPath = envMatch[1].trim();
             const resolved = path.isAbsolute(envPath) ? envPath : path.join(getCurrentCwd(), envPath);
             try {
                 const content = fs.readFileSync(resolved, 'utf8');
-                const envVars = parseEnvFile(content);
-                Object.assign(ctx.vars.named, envVars);
-                outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] loaded env: ${resolved} (${Object.keys(envVars).length} vars)`);
+                Object.assign(ctx.vars.named, parseEnvFile(content));
             }
-            catch (_) {
-                outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] env file not found: ${resolved}`);
+            catch (_) { }
+            ctx.nowLine++;
+            continue;
+        }
+        const fenceExecMatch = line.match(/^([ \t]*)(`{3,}|~{3,})\s*(bash|zsh|sh|yaml|conf|json)\b(?:\s+(.+))?\s*$/i);
+        if (fenceExecMatch) {
+            const depthMatch = fenceExecMatch[1];
+            let depth = 0;
+            for (const c of depthMatch) {
+                if (c === '\t')
+                    depth++;
+            }
+            const lang = fenceExecMatch[3].toLowerCase();
+            const argPath = (_a = fenceExecMatch[4]) === null || _a === void 0 ? void 0 : _a.trim();
+            const blk = collectFencedBlock(lines, i);
+            if (blk.content !== null) {
+                if (['yaml', 'conf', 'json'].includes(lang)) {
+                    const isRandom = !argPath;
+                    const ext = lang === 'conf' ? 'conf' : lang;
+                    const randomName = generateRandomAlpha(8);
+                    const filename = argPath || `${randomName}.${ext}`;
+                    const resolved = path.isAbsolute(filename) ? filename : path.join(getCurrentCwd(), filename);
+                    ctx.execFlag = true;
+                    const header = `\n[ write: ${filename}${isRandom ? ' (auto-generated)' : ''} ] ${getDate()}\n`;
+                    if (ctx.dryRun) {
+                        const n = blk.content.split('\n').length;
+                        ctx.consoles += header + `[dry-run] would write ${n} line(s) to ${resolved}\n`;
+                    }
+                    else {
+                        try {
+                            fs.mkdirSync(path.dirname(resolved), { recursive: true });
+                            fs.writeFileSync(resolved, blk.content + '\n', 'utf8');
+                            const n = blk.content.split('\n').length;
+                            ctx.consoles += header + `wrote ${n} line(s) to ${resolved}\n`;
+                            pushReport({ command: `write: ${filename}`, rendered: `write: ${filename}`, output: `wrote ${n} line(s)`, code: 0, ts: getDate(), ok: true, startMs: Date.now(), endMs: Date.now(), isParallel: false, parallelGroup: -1 });
+                        }
+                        catch (err) {
+                            ctx.consoles += header + `error: ${String(err)}\n`;
+                        }
+                    }
+                    ctx.execCount = depth + 1;
+                }
+                else {
+                    ctx.execFlag = true;
+                    const blockLines = blk.content.split(/\r?\n/);
+                    const logicalCommands = [];
+                    for (let b = 0; b < blockLines.length; b++) {
+                        let cmd = blockLines[b];
+                        while (cmd.match(/\\\s*$/) && b + 1 < blockLines.length) {
+                            cmd = cmd.replace(/\\\s*$/, '') + blockLines[b + 1];
+                            b++;
+                        }
+                        const trimmed = cmd.trim();
+                        if (trimmed.length > 0 && !trimmed.startsWith('#')) {
+                            logicalCommands.push(trimmed);
+                        }
+                    }
+                    ctx.execCount = depth + 1;
+                    for (const rawCmd of logicalCommands) {
+                        if (ctx.token.isCancellationRequested)
+                            break;
+                        let finalCmd = substituteVars(rawCmd, ctx.vars);
+                        finalCmd = applyChangeWord(finalCmd, ctx.cfg.changeWord);
+                        await runOneCommand(`- ${finalCmd}`, 0, ctx);
+                        if (ctx.vars.status !== 0) {
+                            ctx.execCount = 0;
+                            break;
+                        }
+                    }
+                }
+                i += blk.consumed - 1;
+                ctx.nowLine += blk.consumed - 1;
+                continue;
+            }
+        }
+        const promptDir = parsePromptDirective(line);
+        if (promptDir !== null) {
+            const { depth, bindName, message, secret } = promptDir;
+            const atExpected = new RegExp(regTab(ctx.execCount)).test(line);
+            const atTop = new RegExp(regTab(0)).test(line);
+            if (!atExpected && !atTop) {
+                ctx.execCount = 0;
+                ctx.nowLine++;
+                continue;
+            }
+            if (!atExpected) {
+                ctx.execCount = 0;
+            }
+            ctx.execFlag = true;
+            if (ctx.dryRun) {
+                ctx.consoles += `\n[ prompt: {${bindName}} ] ${getDate()}\n[dry-run] would prompt: ${message}\n`;
+                ctx.execCount = depth + 1;
+            }
+            else {
+                const val = await vscode.window.showInputBox({ prompt: message, password: secret, ignoreFocusOut: true });
+                if (val === undefined) {
+                    ctx.consoles += `\n[ prompt: {${bindName}} ] ${getDate()}\n(cancelled by user)\n`;
+                    ctx.execCount = 0;
+                }
+                else {
+                    ctx.vars.named[bindName] = val;
+                    ctx.consoles += `\n[ prompt: {${bindName}} ] ${getDate()}\n(input received)\n`;
+                    ctx.execCount = depth + 1;
+                    // ① Refresh inspector after prompt input
+                    refreshVarInspector(ctx.vars);
+                }
             }
             ctx.nowLine++;
             continue;
         }
-        // 1. number-list creates {N}
         const numHit = detectNumbered(line);
         if (numHit) {
             await handleNumberedAssignment(numHit, ctx);
         }
-        // expand variables ({N}, {name}, {$PREV} ...)
         line = substituteVars(line, ctx.vars);
         line = applyChangeWord(line, ctx.cfg.changeWord);
-        // write: directive — write fenced block content to a file
         const writeDir = parseWriteDirective(line);
         if (writeDir !== null) {
             const { depth, filePath } = writeDir;
@@ -1111,9 +1027,7 @@ async function runLines(lines, ctx) {
                 ctx.execCount = 0;
             }
             const blk = collectFencedBlock(lines, i + 1);
-            const resolved = path.isAbsolute(filePath)
-                ? filePath
-                : path.join(getCurrentCwd(), filePath);
+            const resolved = path.isAbsolute(filePath) ? filePath : path.join(getCurrentCwd(), filePath);
             ctx.execFlag = true;
             const header = `\n[ write: ${filePath} ] ${getDate()}\n`;
             if (blk.content === null) {
@@ -1122,7 +1036,7 @@ async function runLines(lines, ctx) {
             }
             else if (ctx.dryRun) {
                 const n = blk.content.split('\n').length;
-                ctx.consoles += header + `[dry-run] would write ${n} line${n !== 1 ? 's' : ''} to ${resolved}\n`;
+                ctx.consoles += header + `[dry-run] would write ${n} line(s) to ${resolved}\n`;
                 i += blk.consumed;
                 ctx.nowLine += blk.consumed;
                 ctx.execCount = depth + 1;
@@ -1132,28 +1046,20 @@ async function runLines(lines, ctx) {
                     fs.mkdirSync(path.dirname(resolved), { recursive: true });
                     fs.writeFileSync(resolved, blk.content + '\n', 'utf8');
                     const n = blk.content.split('\n').length;
-                    ctx.consoles += header + `wrote ${n} line${n !== 1 ? 's' : ''} to ${resolved}\n`;
-                    pushReport({
-                        command: `write: ${filePath}`, rendered: `write: ${filePath}`,
-                        output: `wrote ${n} line(s) to ${resolved}`, code: 0, ts: getDate(), ok: true
-                    });
+                    ctx.consoles += header + `wrote ${n} line(s) to ${resolved}\n`;
+                    pushReport({ command: `write: ${filePath}`, rendered: `write: ${filePath}`, output: `wrote ${n} line(s)`, code: 0, ts: getDate(), ok: true, startMs: Date.now(), endMs: Date.now(), isParallel: false, parallelGroup: -1 });
                     i += blk.consumed;
                     ctx.nowLine += blk.consumed;
                     ctx.execCount = depth + 1;
                 }
                 catch (err) {
                     ctx.consoles += header + `error: ${String(err)}\n`;
-                    pushReport({
-                        command: `write: ${filePath}`, rendered: `write: ${filePath}`,
-                        output: String(err), code: 1, ts: getDate(), ok: false
-                    });
                     ctx.execCount = 0;
                 }
             }
             ctx.nowLine++;
             continue;
         }
-        // - assert: ... support inside an indented chain
         const assertHit = parseAssert(line.replace(/^\t*- /, ''));
         if (assertHit && line.match(/^\t*- /)) {
             const passed = evaluateAssert(assertHit, ctx);
@@ -1166,7 +1072,6 @@ async function runLines(lines, ctx) {
             }
             ctx.progress.report({ message: `assert ${passed ? 'pass' : 'FAIL'}` });
             ctx.nowLine++;
-            if (isFenceLine(line)) { /* never */ }
             continue;
         }
         const expectedDepthRe = new RegExp(regTab(ctx.execCount));
@@ -1190,20 +1095,17 @@ async function runLines(lines, ctx) {
             }
             else {
                 ctx.endLine = ctx.nowLine;
-                // Sync vars before breaking so the final command's results persist.
                 Object.assign(persistentVars.num, ctx.vars.num);
                 Object.assign(persistentVars.named, ctx.vars.named);
                 break;
             }
         }
-        // Sync named/numbered variables into persistent store so they survive
-        // horizontal-rule boundaries and subsequent runFromCursor invocations.
         Object.assign(persistentVars.num, ctx.vars.num);
         Object.assign(persistentVars.named, ctx.vars.named);
         ctx.nowLine++;
     }
 }
-function isFenceLine(s) { return /^```/.test(s); }
+function isFenceLine(s) { return /^```\s*$/.test(s); }
 async function handleNumberedAssignment(hit, ctx) {
     var _a;
     const { body, bindName } = extractBinding(hit.body);
@@ -1212,27 +1114,22 @@ async function handleNumberedAssignment(hit, ctx) {
     const sec = checkSecurity(finalCmd, ctx.cfg);
     if (!sec.ok) {
         ctx.vars.num[hit.idx] = `(blocked: ${(_a = sec.reason) !== null && _a !== void 0 ? _a : 'security'})`;
-        outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] blocked: ${finalCmd} (${sec.reason})`);
         return;
     }
     if (sec.dangerous && ctx.cfg.confirmDangerous && !ctx.dryRun) {
-        const ok = await confirmDangerous(finalCmd, sec.dangerous);
-        if (!ok) {
+        if (!(await confirmDangerous(finalCmd, sec.dangerous))) {
             ctx.vars.num[hit.idx] = '(cancelled by user)';
             return;
         }
     }
     if (ctx.dryRun) {
-        const dry = `[dry-run] ${finalCmd}`;
-        ctx.vars.num[hit.idx] = dry;
+        ctx.vars.num[hit.idx] = `[dry-run] ${finalCmd}`;
         if (bindName) {
-            ctx.vars.named[bindName] = dry;
+            ctx.vars.named[bindName] = ctx.vars.num[hit.idx];
         }
         return;
     }
-    // Pure cd: update tracked cwd, bind the resulting path to the variable
     if (isPureCdCommand(finalCmd)) {
-        ctx.progress.report({ message: `cd: ${finalCmd}` });
         const cdRes = await resolveCd(finalCmd, ctx.cfg, ctx.token);
         if (cdRes.ok && cdRes.newCwd) {
             currentCwd = cdRes.newCwd;
@@ -1242,28 +1139,13 @@ async function handleNumberedAssignment(hit, ctx) {
             }
             ctx.vars.prev = currentCwd;
             ctx.vars.status = 0;
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: `cwd changed to ${currentCwd}`,
-                code: 0, ts: getDate(), ok: true
-            });
         }
         else {
-            ctx.vars.num[hit.idx] = `(cd failed: ${cdRes.output})`;
-            if (bindName) {
-                ctx.vars.named[bindName] = ctx.vars.num[hit.idx];
-            }
             ctx.vars.status = 1;
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: cdRes.output, code: 1, ts: getDate(), ok: false
-            });
         }
         return;
     }
-    // Pure export: capture env vars for subsequent commands
     if (isPureExportCommand(finalCmd)) {
-        ctx.progress.report({ message: `export: ${finalCmd}` });
         const expRes = await resolveExport(finalCmd, ctx.cfg, ctx.token);
         if (expRes.ok) {
             Object.assign(currentEnv, expRes.vars);
@@ -1273,27 +1155,16 @@ async function handleNumberedAssignment(hit, ctx) {
             }
             ctx.vars.prev = expRes.output;
             ctx.vars.status = 0;
-            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] export: ${expRes.output}`);
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: expRes.output, code: 0, ts: getDate(), ok: true
-            });
         }
         else {
-            ctx.vars.num[hit.idx] = `(export failed: ${expRes.output})`;
-            if (bindName) {
-                ctx.vars.named[bindName] = ctx.vars.num[hit.idx];
-            }
             ctx.vars.status = 1;
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: expRes.output, code: 1, ts: getDate(), ok: false
-            });
         }
         return;
     }
     ctx.progress.report({ message: `setting {${hit.idx}}: ${finalCmd}` });
-    const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[stderr] ${chunk}` : chunk), currentEnv);
+    const startMs = Date.now();
+    const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), undefined, currentEnv);
+    const endMs = Date.now();
     const trimmed = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
     ctx.vars.num[hit.idx] = trimmed;
     if (bindName) {
@@ -1301,36 +1172,29 @@ async function handleNumberedAssignment(hit, ctx) {
     }
     ctx.vars.prev = res.stdout;
     ctx.vars.status = res.code;
-    pushReport({
-        command: finalCmd, rendered: finalCmd,
-        output: trimmed, code: res.code,
-        ts: getDate(),
-        ok: res.code === 0 && !res.timedOut && !res.cancelled
-    });
+    // ① Refresh inspector after numbered assignment
+    refreshVarInspector(ctx.vars);
+    pushReport({ command: finalCmd, rendered: finalCmd, output: trimmed, code: res.code, ts: getDate(), ok: res.code === 0 && !res.timedOut && !res.cancelled, startMs, endMs, isParallel: false, parallelGroup: -1 });
 }
 async function runOneCommand(rawLine, depth, ctx) {
     var _a, _b;
     const stripRe = new RegExp(regTab(depth));
     const rawBody = rawLine.replace(stripRe, '');
     const { body: noParallelBody } = detectParallelFlag(rawBody);
-    const { body: cleanBody, bindName } = extractBinding(noParallelBody);
-    // runbook include: "include: path/to/other.md"
-    if (/^include:\s+/i.test(noParallelBody)) {
-        const includePath = noParallelBody.replace(/^include:\s+/i, '').trim();
-        await runInclude(includePath, ctx);
+    const { body: noRetryBody, retryCount, retryInterval } = detectRetryFlag(noParallelBody);
+    const { body: cleanBody, bindName } = extractBinding(noRetryBody);
+    if (/^include:\s+/i.test(cleanBody)) {
+        await runInclude(cleanBody.replace(/^include:\s+/i, '').trim(), ctx);
         ctx.execFlag = true;
         ctx.execCount = depth + 1;
         return;
     }
-    // file open in new tab: "open: path"
     if (/^open:\s+/i.test(cleanBody)) {
-        const fname = cleanBody.replace(/^open:\s+/i, '').trim();
-        await openFileTab(fname);
+        await openFileTab(cleanBody.replace(/^open:\s+/i, '').trim());
         ctx.execFlag = true;
         ctx.execCount = depth + 1;
         return;
     }
-    // terminal passthrough: "! command"  (sends to active terminal, no output capture)
     if (/^!\s+/.test(cleanBody)) {
         const termCmd = cleanBody.replace(/^!\s+/, '').trim();
         ctx.consoles += `\n[ ! ${termCmd} ] ${getDate()}\n`;
@@ -1356,8 +1220,7 @@ async function runOneCommand(rawLine, depth, ctx) {
         return;
     }
     if (sec.dangerous && ctx.cfg.confirmDangerous && !ctx.dryRun) {
-        const ok = await confirmDangerous(finalCmd, sec.dangerous);
-        if (!ok) {
+        if (!(await confirmDangerous(finalCmd, sec.dangerous))) {
             ctx.consoles += '(cancelled by user)\n';
             ctx.execCount = 0;
             return;
@@ -1365,27 +1228,14 @@ async function runOneCommand(rawLine, depth, ctx) {
     }
     if (ctx.dryRun) {
         ctx.consoles += `[dry-run] ${finalCmd}\n`;
-        if (isPureCdCommand(finalCmd)) {
-            ctx.consoles += `(dry-run: cwd would be resolved from "${getCurrentCwd()}")\n`;
-        }
-        if (isPureExportCommand(finalCmd)) {
-            ctx.consoles += `(dry-run: environment variable would be exported)\n`;
-        }
         ctx.execCount = depth + 1;
         return;
     }
-    // When the user enabled toTerminal we still want the command to appear in
-    // the terminal panel for visibility, but the post-execution output must
-    // also be written back to the Markdown buffer.  We therefore mirror the
-    // command into the terminal here, then continue with the regular spawn
-    // execution below so that stdout/stderr can be captured.
     if (ctx.cfg.toterminal) {
         (_b = vscode.window.activeTerminal) === null || _b === void 0 ? void 0 : _b.sendText(finalCmd);
         ctx.consoles += `(sent to terminal)\n`;
     }
-    // ---- Pure `cd` command: update tracked cwd without running it twice. ----
     if (isPureCdCommand(finalCmd)) {
-        ctx.progress.report({ message: `cd: ${finalCmd}` });
         const cdRes = await resolveCd(finalCmd, ctx.cfg, ctx.token);
         if (cdRes.ok && cdRes.newCwd) {
             currentCwd = cdRes.newCwd;
@@ -1395,28 +1245,16 @@ async function runOneCommand(rawLine, depth, ctx) {
             if (bindName) {
                 ctx.vars.named[bindName] = currentCwd;
             }
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: `cwd changed to ${currentCwd}`,
-                code: 0, ts: getDate(), ok: true
-            });
             ctx.execCount = depth + 1;
         }
         else {
             ctx.consoles += `${cdRes.output}\n[cd failed]\n`;
             ctx.vars.status = 1;
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: cdRes.output,
-                code: 1, ts: getDate(), ok: false
-            });
             ctx.execCount = 0;
         }
         return;
     }
-    // ---- Pure `export` command: capture env vars for subsequent commands. ----
     if (isPureExportCommand(finalCmd)) {
-        ctx.progress.report({ message: `export: ${finalCmd}` });
         const expRes = await resolveExport(finalCmd, ctx.cfg, ctx.token);
         if (expRes.ok) {
             Object.assign(currentEnv, expRes.vars);
@@ -1426,112 +1264,104 @@ async function runOneCommand(rawLine, depth, ctx) {
             if (bindName) {
                 ctx.vars.named[bindName] = expRes.output;
             }
-            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] export: ${expRes.output}`);
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: expRes.output, code: 0, ts: getDate(), ok: true
-            });
             ctx.execCount = depth + 1;
         }
         else {
             ctx.consoles += `${expRes.output}\n[export failed]\n`;
             ctx.vars.status = 1;
-            pushReport({
-                command: finalCmd, rendered: finalCmd,
-                output: expRes.output, code: 1, ts: getDate(), ok: false
-            });
             ctx.execCount = 0;
         }
         return;
     }
-    ctx.progress.report({ message: finalCmd });
-    const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[stderr] ${chunk}` : chunk), currentEnv);
-    const out = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '');
-    ctx.consoles += out;
-    if (res.timedOut) {
-        ctx.consoles += `\n[timeout after ${ctx.cfg.timeout}ms]\n`;
+    let attempts = 0;
+    let maxAttempts = retryCount > 0 ? retryCount + 1 : 1;
+    let res = null;
+    const startMs = Date.now();
+    while (attempts < maxAttempts && !ctx.token.isCancellationRequested) {
+        if (attempts > 0) {
+            const waitMsg = `\n[retry ${attempts}/${retryCount} wait ${retryInterval}ms...]\n`;
+            ctx.consoles += waitMsg;
+            await new Promise(r => setTimeout(r, retryInterval));
+        }
+        ctx.progress.report({ message: `${finalCmd}${retryCount > 0 ? ` (try ${attempts + 1})` : ''}` });
+        res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => {
+            const text = isStderr ? `[stderr] ${chunk}` : chunk;
+            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(text);
+            ctx.consoles += text;
+        }, currentEnv);
+        let suffix = "";
+        if (res.timedOut) {
+            suffix += `\n[timeout after ${ctx.cfg.timeout}ms]\n`;
+        }
+        if (res.cancelled) {
+            suffix += `\n[cancelled]\n`;
+        }
+        if (res.code !== 0 && !res.cancelled && !res.timedOut) {
+            suffix += `\n[exit ${res.code}]\n`;
+        }
+        ctx.consoles += suffix;
+        if (res.code === 0 && !res.timedOut && !res.cancelled) {
+            break;
+        }
+        attempts++;
     }
-    if (res.cancelled) {
-        ctx.consoles += `\n[cancelled]\n`;
-    }
-    if (res.code !== 0 && !res.cancelled && !res.timedOut) {
-        ctx.consoles += `\n[exit ${res.code}]\n`;
-    }
-    ctx.vars.prev = res.stdout;
-    ctx.vars.status = res.code;
-    if (bindName) {
-        ctx.vars.named[bindName] = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
-    }
-    pushReport({
-        command: finalCmd, rendered: finalCmd,
-        output: out, code: res.code,
-        ts: getDate(),
-        ok: res.code === 0 && !res.timedOut && !res.cancelled
-    });
-    if (res.code === 0 && !res.timedOut && !res.cancelled) {
-        ctx.execCount = depth + 1;
-    }
-    else {
-        ctx.execCount = 0;
+    const endMs = Date.now();
+    if (res) {
+        ctx.vars.prev = res.stdout;
+        ctx.vars.status = res.code;
+        if (bindName) {
+            ctx.vars.named[bindName] = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
+        }
+        pushReport({
+            command: finalCmd, rendered: finalCmd,
+            output: res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : ''), code: res.code, ts: getDate(),
+            ok: res.code === 0 && !res.timedOut && !res.cancelled,
+            startMs, endMs, isParallel: false, parallelGroup: -1
+        });
+        ctx.execCount = (res.code === 0 && !res.timedOut && !res.cancelled) ? depth + 1 : 0;
     }
 }
 async function runInclude(includePath, ctx) {
-    const resolved = path.isAbsolute(includePath)
-        ? includePath
-        : path.join(getCurrentCwd(), includePath);
+    const resolved = path.isAbsolute(includePath) ? includePath : path.join(getCurrentCwd(), includePath);
     if (!fs.existsSync(resolved)) {
         ctx.consoles += `\n[include: file not found: ${resolved}]\n`;
         return;
     }
-    outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] including: ${resolved}`);
     ctx.consoles += `\n[ include: ${resolved} ] ${getDate()}\n`;
-    let content;
     try {
-        content = fs.readFileSync(resolved, 'utf8');
+        const subCtx = { ...ctx, consoles: '', execCount: 0, execFlag: false, horizonFlag: -1, startLine: 0, endLine: 0, nowLine: 0, assertionFailed: false };
+        await runLines(fs.readFileSync(resolved, 'utf8').split(/\r?\n/), subCtx);
+        ctx.consoles += subCtx.consoles;
+        ctx.vars = subCtx.vars;
+        ctx.execFlag = ctx.execFlag || subCtx.execFlag;
     }
     catch (err) {
         ctx.consoles += `\n[include: read error: ${String(err)}]\n`;
-        return;
     }
-    const includedLines = content.split(/\r?\n/);
-    const subCtx = {
-        ...ctx,
-        consoles: '',
-        execCount: 0,
-        execFlag: false,
-        horizonFlag: -1,
-        startLine: 0,
-        endLine: 0,
-        nowLine: 0,
-        assertionFailed: false
-    };
-    await runLines(includedLines, subCtx);
-    ctx.consoles += subCtx.consoles;
-    ctx.vars = subCtx.vars;
-    ctx.execFlag = ctx.execFlag || subCtx.execFlag;
 }
 async function runParallelGroup(rawLines, depth, ctx) {
     ctx.execFlag = true;
     const depthRe = new RegExp(regTab(depth));
+    // ④ Assign a group id for timeline waterfall
+    const groupId = ++parallelGroupCounter;
+    const groupStartMs = Date.now();
     const tasks = rawLines.map(async (rawLine) => {
         const rawBody = rawLine.replace(depthRe, '');
-        const { body: noParallelBody } = detectParallelFlag(rawBody);
-        const { body: cleanBody, bindName } = extractBinding(noParallelBody);
-        const substituted = substituteVars(cleanBody, ctx.vars);
-        const afterChange = applyChangeWord(substituted, ctx.cfg.changeWord);
-        const finalCmd = applyTemplate(afterChange, ctx.cfg, ctx.profile);
+        const { body: cleanBody, bindName } = extractBinding(detectParallelFlag(rawBody).body);
+        const finalCmd = applyTemplate(applyChangeWord(substituteVars(cleanBody, ctx.vars), ctx.cfg.changeWord), ctx.cfg, ctx.profile);
         const header = `\n[ ${finalCmd} ] ${getDate()}\n`;
         if (ctx.dryRun) {
-            return { header, output: `[dry-run] ${finalCmd}\n`, ok: true, bindName, bindVal: '' };
+            return { header, output: `[dry-run] ${finalCmd}\n`, ok: true, bindName, bindVal: '', startMs: groupStartMs, endMs: groupStartMs };
         }
         const sec = checkSecurity(finalCmd, ctx.cfg);
         if (!sec.ok) {
-            return { header, output: `(blocked: ${sec.reason})\n`, ok: false, bindName, bindVal: '' };
+            return { header, output: `(blocked: ${sec.reason})\n`, ok: false, bindName, bindVal: '', startMs: groupStartMs, endMs: Date.now() };
         }
         ctx.progress.report({ message: `[parallel] ${finalCmd}` });
+        const taskStart = Date.now();
         const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`), currentEnv);
-        const out = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '');
-        let suffix = '';
+        const taskEnd = Date.now();
+        let suffix = "";
         if (res.timedOut) {
             suffix += `\n[timeout after ${ctx.cfg.timeout}ms]\n`;
         }
@@ -1543,8 +1373,9 @@ async function runParallelGroup(rawLines, depth, ctx) {
         }
         const bindVal = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
         const ok = res.code === 0 && !res.timedOut && !res.cancelled;
-        pushReport({ command: finalCmd, rendered: finalCmd, output: out + suffix, code: res.code, ts: getDate(), ok });
-        return { header, output: out + suffix, ok, bindName, bindVal };
+        const output = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '') + suffix;
+        pushReport({ command: finalCmd, rendered: finalCmd, output, code: res.code, ts: getDate(), ok, startMs: taskStart, endMs: taskEnd, isParallel: true, parallelGroup: groupId });
+        return { header, output, ok, bindName, bindVal, startMs: taskStart, endMs: taskEnd };
     });
     const results = await Promise.all(tasks);
     for (const r of results) {
@@ -1557,9 +1388,7 @@ async function runParallelGroup(rawLines, depth, ctx) {
 }
 async function runOrParallel(firstLine, depth, lines, curIdx, ctx) {
     const depthRe = new RegExp(regTab(depth));
-    const bodyForCheck = firstLine.replace(depthRe, '');
-    const { parallel } = detectParallelFlag(bodyForCheck);
-    if (!parallel) {
+    if (!detectParallelFlag(firstLine.replace(depthRe, '')).parallel) {
         await runOneCommand(firstLine, depth, ctx);
         return { newIdx: curIdx, extraNowLine: 0 };
     }
@@ -1569,15 +1398,7 @@ async function runOrParallel(firstLine, depth, lines, curIdx, ctx) {
     while (j < lines.length && !ctx.token.isCancellationRequested) {
         const nextCont = joinContinuedLines(lines, j);
         const nextLine = normalizeIndent(nextCont.joined);
-        if (horizonCheck(nextLine)) {
-            break;
-        }
-        if (!depthRe.test(nextLine)) {
-            break;
-        }
-        const nextBody = nextLine.replace(depthRe, '');
-        const { parallel: nextParallel } = detectParallelFlag(nextBody);
-        if (!nextParallel) {
+        if (horizonCheck(nextLine) || !depthRe.test(nextLine) || !detectParallelFlag(nextLine.replace(depthRe, '')).parallel) {
             break;
         }
         parallelLines.push(nextLine);
@@ -1591,18 +1412,12 @@ async function openFileTab(fname) {
     var _a;
     const folder = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0];
     if (!folder) {
-        vscode.window.showWarningMessage(`code-lc4ri: cannot resolve "${fname}" — no workspace open.`);
         return;
     }
-    const fullPath = path.isAbsolute(fname) ? fname : path.join(folder.uri.fsPath, fname);
     try {
-        const uri = vscode.Uri.file(fullPath);
-        const doc = await vscode.workspace.openTextDocument(uri);
-        await vscode.window.showTextDocument(doc);
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(path.isAbsolute(fname) ? fname : path.join(folder.uri.fsPath, fname))));
     }
-    catch (err) {
-        vscode.window.showWarningMessage(`code-lc4ri: cannot open "${fname}": ${String(err)}`);
-    }
+    catch (err) { }
 }
 function evaluateAssert(a, ctx) {
     switch (a.kind) {
@@ -1621,21 +1436,13 @@ function describeAssert(a) {
     }
 }
 // -----------------------------------------------------------------------------
-// write back: same wrap-in-fences semantics as the original
+// Live streaming markdown write back
 // -----------------------------------------------------------------------------
-async function writeBackOutput(editor, doc, ctx) {
+async function syncOutput(editor, doc, ctx) {
+    if (!ctx.execFlag || ctx.consoles === ctx.lastRenderedConsoles)
+        return;
     let body = ctx.consoles;
-    let startLine = ctx.startLine;
-    let endLine = ctx.endLine;
-    if (startLine === 0 && endLine === 0) {
-        if (ctx.horizonFlag > -1) {
-            startLine = ctx.horizonFlag - 1;
-            endLine = ctx.horizonFlag;
-        }
-        else {
-            startLine = doc.lineCount - 1;
-            endLine = doc.lineCount;
-        }
+    if (ctx.startLine === 0 && ctx.endLine === 0) {
         if (ctx.cfg.outputFormat === 'collapsible') {
             body = `\n<details><summary>output ${getDate()}</summary>\n\n\`\`\`\n${body}\n\`\`\`\n\n</details>\n`;
         }
@@ -1643,13 +1450,42 @@ async function writeBackOutput(editor, doc, ctx) {
             body = `\n\`\`\`\n${body}\n\`\`\`\n`;
         }
     }
-    const startPos = new vscode.Position(startLine + 1, 0);
-    const endPos = new vscode.Position(Math.max(0, endLine - 1), 10000);
-    const sel = new vscode.Selection(startPos, endPos);
-    await editor.edit(edit => { edit.replace(sel, body); });
+    if (!ctx.outputMarkerRange) {
+        let startL = ctx.startLine;
+        let endL = ctx.endLine;
+        if (startL === 0 && endL === 0) {
+            if (ctx.horizonFlag > -1) {
+                startL = ctx.horizonFlag - 1;
+                endL = ctx.horizonFlag;
+            }
+            else {
+                startL = doc.lineCount - 1;
+                endL = doc.lineCount;
+            }
+        }
+        const insertPos = new vscode.Position(startL + 1, 0);
+        const endPos = new vscode.Position(Math.max(0, endL - 1), 10000);
+        const success = await editor.edit(b => b.replace(new vscode.Range(insertPos, endPos), body));
+        if (success) {
+            ctx.lastRenderedConsoles = ctx.consoles;
+            const lineCount = body.split('\n').length - 1;
+            ctx.outputBlockStartLine = insertPos.line;
+            ctx.outputBlockEndLine = insertPos.line + lineCount;
+            ctx.outputMarkerRange = true;
+        }
+    }
+    else {
+        const r = new vscode.Range(ctx.outputBlockStartLine, 0, ctx.outputBlockEndLine, 10000);
+        const success = await editor.edit(b => b.replace(r, body));
+        if (success) {
+            ctx.lastRenderedConsoles = ctx.consoles;
+            const lineCount = body.split('\n').length - 1;
+            ctx.outputBlockEndLine = ctx.outputBlockStartLine + lineCount;
+        }
+    }
 }
 // =============================================================================
-// runSingleLine: invoked by the CodeLens "▶ Run" / "Dry-run" actions
+// CodeLens provider / runSingleLine
 // =============================================================================
 async function runSingleLine(uri, line, dryRun) {
     const editor = vscode.window.activeTextEditor;
@@ -1660,45 +1496,63 @@ async function runSingleLine(uri, line, dryRun) {
     if (!newEditor) {
         return;
     }
-    // Move cursor onto the requested line, then re-use runFromCursor.
     const pos = new vscode.Position(line, 0);
     newEditor.selection = new vscode.Selection(pos, pos);
     await runFromCursor({ dryRun });
 }
-// =============================================================================
-// CodeLens provider
-// =============================================================================
 class LC4RICodeLensProvider {
-    constructor(emitter) {
-        this.onDidChangeCodeLenses = emitter;
-    }
+    constructor(emitter) { this.onDidChangeCodeLenses = emitter; }
     provideCodeLenses(doc) {
         const cfg = readConfig();
         if (!cfg.showCodeLens) {
             return [];
         }
         const lenses = [];
+        let insideOutputBlock = false;
+        let blockOpenLine = -1;
         for (let i = 0; i < doc.lineCount; i++) {
             const line = doc.lineAt(i).text;
+            // ③ Detect output code block (``` followed by content lines then ```)
+            if (/^```\s*$/.test(line)) {
+                if (!insideOutputBlock) {
+                    insideOutputBlock = true;
+                    blockOpenLine = i;
+                }
+                else {
+                    // Closing fence: add Search + Clear lenses on the opening line
+                    if (blockOpenLine >= 0) {
+                        const range = doc.lineAt(blockOpenLine).range;
+                        lenses.push(new vscode.CodeLens(range, {
+                            title: '🔍 Search output',
+                            command: 'extension.lc4ri.searchOutput',
+                            arguments: [blockOpenLine]
+                        }));
+                        lenses.push(new vscode.CodeLens(range, {
+                            title: '🗑 Clear',
+                            command: 'extension.lc4ri.clearOutput',
+                            arguments: []
+                        }));
+                    }
+                    insideOutputBlock = false;
+                    blockOpenLine = -1;
+                }
+                continue;
+            }
+            // Reset if we hit a non-empty non-fence line before finding the block open
+            if (insideOutputBlock) {
+                continue;
+            }
             if (detectListCommand(line) || detectNumbered(line)) {
                 const range = doc.lineAt(i).range;
-                lenses.push(new vscode.CodeLens(range, {
-                    title: '▶ Run',
-                    command: 'extension.lc4ri.runLine',
-                    arguments: [doc.uri, i, false]
-                }));
-                lenses.push(new vscode.CodeLens(range, {
-                    title: 'Dry-run',
-                    command: 'extension.lc4ri.runLine',
-                    arguments: [doc.uri, i, true]
-                }));
+                lenses.push(new vscode.CodeLens(range, { title: '▶ Run', command: 'extension.lc4ri.runLine', arguments: [doc.uri, i, false] }));
+                lenses.push(new vscode.CodeLens(range, { title: 'Dry-run', command: 'extension.lc4ri.runLine', arguments: [doc.uri, i, true] }));
             }
         }
         return lenses;
     }
 }
 // =============================================================================
-// Status bar / profile switcher
+// Status bar / profile switcher / clear output
 // =============================================================================
 function updateStatusBar() {
     if (!statusBarItem) {
@@ -1706,31 +1560,18 @@ function updateStatusBar() {
     }
     const cfg = readConfig();
     const profileNames = Object.keys(cfg.profiles);
-    const label = activeProfile
-        ? `$(terminal) lc4ri: ${activeProfile}`
-        : (profileNames.length ? '$(terminal) lc4ri: (none)' : '$(terminal) lc4ri');
-    statusBarItem.text = label;
+    statusBarItem.text = activeProfile ? `$(terminal) lc4ri: ${activeProfile}` : (profileNames.length ? '$(terminal) lc4ri: (none)' : '$(terminal) lc4ri');
 }
 async function switchProfile() {
     const cfg = readConfig();
-    const items = [
-        { label: '(none)', description: 'use legacy OS-keyed template only' },
-        ...Object.keys(cfg.profiles).map(k => ({ label: k, description: cfg.profiles[k] }))
-    ];
-    const pick = await vscode.window.showQuickPick(items, {
-        title: 'code-lc4ri: switch execution profile',
-        placeHolder: activeProfile || '(none)'
-    });
+    const items = [{ label: '(none)', description: 'use legacy OS-keyed template only' }, ...Object.keys(cfg.profiles).map(k => ({ label: k, description: cfg.profiles[k] }))];
+    const pick = await vscode.window.showQuickPick(items, { title: 'code-lc4ri: switch execution profile', placeHolder: activeProfile || '(none)' });
     if (!pick) {
         return;
     }
     activeProfile = pick.label === '(none)' ? '' : pick.label;
     updateStatusBar();
-    outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] active profile -> ${activeProfile || '(none)'}`);
 }
-// =============================================================================
-// Misc commands
-// =============================================================================
 async function clearOutputBlock() {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
@@ -1738,10 +1579,9 @@ async function clearOutputBlock() {
     }
     const doc = editor.document;
     const cursor = editor.selection.active.line;
-    // find the nearest ``` ... ``` block that contains or follows the cursor
     let start = -1, end = -1;
     for (let i = cursor; i < doc.lineCount; i++) {
-        if (/^```/.test(doc.lineAt(i).text)) {
+        if (/^```\s*$/.test(doc.lineAt(i).text)) {
             start = i;
             break;
         }
@@ -1750,7 +1590,7 @@ async function clearOutputBlock() {
         return;
     }
     for (let i = start + 1; i < doc.lineCount; i++) {
-        if (/^```/.test(doc.lineAt(i).text)) {
+        if (/^```\s*$/.test(doc.lineAt(i).text)) {
             end = i;
             break;
         }
@@ -1758,18 +1598,19 @@ async function clearOutputBlock() {
     if (end === -1) {
         return;
     }
-    const range = new vscode.Range(new vscode.Position(start, 0), new vscode.Position(end, doc.lineAt(end).text.length));
-    await editor.edit(b => b.replace(range, '```\n```'));
+    await editor.edit(b => b.replace(new vscode.Range(new vscode.Position(start, 0), new vscode.Position(end, doc.lineAt(end).text.length)), '```\n```'));
 }
-function getDate() {
-    return new Date(Date.now()).toString();
-}
+function getDate() { return new Date(Date.now()).toString(); }
 function pushReport(entry) {
     reportEntries.push(entry);
+    // ② Also add to current session
+    if (currentSession) {
+        currentSession.entries.push(entry);
+    }
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[${entry.ts}] (${entry.ok ? 'ok' : 'NG'} code=${entry.code}) ${entry.command}`);
 }
 // =============================================================================
-// Export report  (Markdown / HTML)
+// Export report
 // =============================================================================
 async function exportReport(kind = 'html') {
     var _a;
@@ -1778,57 +1619,733 @@ async function exportReport(kind = 'html') {
         return;
     }
     const folder = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0];
-    const dir = folder ? folder.uri.fsPath : os.tmpdir();
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const fname = path.join(dir, `lc4ri-report-${stamp}.${kind}`);
-    const body = kind === 'md' ? buildMarkdownReport() : buildHtmlReport();
-    fs.writeFileSync(fname, body, 'utf8');
-    const open = await vscode.window.showInformationMessage(`code-lc4ri: report saved to ${fname}`, 'Open');
-    if (open === 'Open') {
-        const doc = await vscode.workspace.openTextDocument(fname);
-        await vscode.window.showTextDocument(doc);
+    const fname = path.join(folder ? folder.uri.fsPath : os.tmpdir(), `lc4ri-report-${new Date().toISOString().replace(/[:.]/g, '-')}.${kind}`);
+    fs.writeFileSync(fname, kind === 'md' ? buildMarkdownReport() : buildHtmlReport(), 'utf8');
+    if (await vscode.window.showInformationMessage(`code-lc4ri: report saved to ${fname}`, 'Open') === 'Open') {
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(fname));
     }
 }
 function buildMarkdownReport() {
-    let s = `# code-lc4ri execution report\n\n`;
-    s += `- generated: ${new Date().toISOString()}\n`;
-    s += `- profile:   ${activeProfile || '(none)'}\n`;
-    s += `- host:      ${os.hostname()}\n`;
-    s += `- user:      ${os.userInfo().username}\n\n`;
+    let s = `# code-lc4ri execution report\n\n- generated: ${new Date().toISOString()}\n- profile:   ${activeProfile || '(none)'}\n- host:      ${os.hostname()}\n- user:      ${os.userInfo().username}\n\n`;
     for (const e of reportEntries) {
-        s += `## ${e.ok ? '✅' : '❌'} ${e.command}\n\n`;
-        s += `- at: ${e.ts}\n- exit: ${e.code}\n\n\`\`\`\n${e.output}\n\`\`\`\n\n`;
+        s += `## ${e.ok ? '✅' : '❌'} ${e.command}\n\n- at: ${e.ts}\n- exit: ${e.code}\n- duration: ${e.endMs - e.startMs}ms\n\n\`\`\`\n${e.output}\n\`\`\`\n\n`;
     }
     return s;
 }
 function buildHtmlReport() {
-    const rows = reportEntries.map(e => `
-        <section class="${e.ok ? 'ok' : 'ng'}">
-            <h3>${escapeHtml(e.command)}</h3>
-            <p class="meta">at ${escapeHtml(e.ts)} — exit ${e.code}</p>
-            <pre>${escapeHtml(e.output)}</pre>
-        </section>`).join('\n');
-    return `<!doctype html><html><head><meta charset="utf-8"><title>lc4ri report</title>
-<style>
-  body{font-family:system-ui,sans-serif;max-width:920px;margin:2em auto;padding:0 1em;}
-  h1{border-bottom:1px solid #ccc;}
-  section{border-left:4px solid #aaa;margin:1em 0;padding:0.5em 1em;}
-  section.ok{border-color:#3a3;background:#f3fbf3;}
-  section.ng{border-color:#c33;background:#fbf3f3;}
-  pre{background:#111;color:#eee;padding:1em;overflow:auto;}
-  .meta{color:#666;font-size:0.9em;}
-</style></head><body>
-<h1>code-lc4ri execution report</h1>
-<p><b>generated:</b> ${escapeHtml(new Date().toISOString())}<br>
-<b>profile:</b> ${escapeHtml(activeProfile || '(none)')}<br>
-<b>host:</b> ${escapeHtml(os.hostname())}<br>
-<b>user:</b> ${escapeHtml(os.userInfo().username)}</p>
-${rows}
-</body></html>`;
+    const rows = reportEntries.map(e => `<section class="${e.ok ? 'ok' : 'ng'}"><h3>${escapeHtml(e.command)}</h3><p class="meta">at ${escapeHtml(e.ts)} — exit ${e.code} — ${e.endMs - e.startMs}ms</p><pre>${escapeHtml(e.output)}</pre></section>`).join('\n');
+    return `<!doctype html><html><head><meta charset="utf-8"><title>lc4ri report</title><style>body{font-family:system-ui,sans-serif;max-width:920px;margin:2em auto;padding:0 1em;} h1{border-bottom:1px solid #ccc;} section{border-left:4px solid #aaa;margin:1em 0;padding:0.5em 1em;} section.ok{border-color:#3a3;background:#f3fbf3;} section.ng{border-color:#c33;background:#fbf3f3;} pre{background:#111;color:#eee;padding:1em;overflow:auto;} .meta{color:#666;font-size:0.9em;}</style></head><body><h1>code-lc4ri execution report</h1><p><b>generated:</b> ${escapeHtml(new Date().toISOString())}<br><b>profile:</b> ${escapeHtml(activeProfile || '(none)')}<br><b>host:</b> ${escapeHtml(os.hostname())}<br><b>user:</b> ${escapeHtml(os.userInfo().username)}</p>${rows}</body></html>`;
 }
-function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, c => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[c]));
+function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// =============================================================================
+// ① Variable Inspector Panel
+// =============================================================================
+function showVarInspector(context) {
+    if (varInspectorPanel) {
+        varInspectorPanel.reveal(vscode.ViewColumn.Beside);
+        postVarData({ num: persistentVars.num, named: persistentVars.named, prev: '', status: 0 });
+        return;
+    }
+    varInspectorPanel = vscode.window.createWebviewPanel('lc4riVarInspector', 'lc4ri: Variable Inspector', vscode.ViewColumn.Beside, { enableScripts: true, retainContextWhenHidden: true });
+    varInspectorPanel.webview.html = buildVarInspectorHtml();
+    varInspectorPanel.onDidDispose(() => { varInspectorPanel = undefined; }, null, context.subscriptions);
+    // Send current vars immediately
+    postVarData({ num: persistentVars.num, named: persistentVars.named, prev: '', status: 0 });
+}
+function refreshVarInspector(vars) {
+    if (!varInspectorPanel) {
+        return;
+    }
+    postVarData(vars);
+}
+function postVarData(vars) {
+    if (!varInspectorPanel) {
+        return;
+    }
+    varInspectorPanel.webview.postMessage({
+        type: 'update',
+        num: vars.num,
+        named: vars.named,
+        prev: vars.prev,
+        status: vars.status,
+        cwd: getCurrentCwd(),
+        env: currentEnv,
+        ts: new Date().toISOString()
+    });
+}
+function buildVarInspectorHtml() {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Variable Inspector</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--vscode-font-family, monospace); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 0; }
+  header { padding: 10px 14px 8px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; background: var(--vscode-editor-background); z-index: 10; }
+  header h1 { font-size: 13px; font-weight: 600; opacity: 0.9; }
+  .ts { font-size: 11px; opacity: 0.5; }
+  .search-bar { padding: 6px 14px; border-bottom: 1px solid var(--vscode-panel-border); }
+  .search-bar input { width: 100%; padding: 4px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, #555); border-radius: 3px; font-size: 12px; outline: none; }
+  .search-bar input:focus { border-color: var(--vscode-focusBorder); }
+  section { border-bottom: 1px solid var(--vscode-panel-border); }
+  section summary { padding: 7px 14px; cursor: pointer; font-weight: 600; font-size: 12px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
+  section summary::-webkit-details-marker { display: none; }
+  section summary::before { content: '▶'; font-size: 9px; transition: transform 0.15s; }
+  section[open] summary::before { transform: rotate(90deg); }
+  .var-table { width: 100%; border-collapse: collapse; }
+  .var-table td { padding: 4px 14px; vertical-align: top; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.1)); }
+  .var-table tr:last-child td { border-bottom: none; }
+  .var-table tr:hover td { background: var(--vscode-list-hoverBackground); }
+  .var-name { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-symbolIcon-variableForeground, #9CDCFE); font-weight: 500; white-space: nowrap; width: 120px; }
+  .var-val { font-family: var(--vscode-editor-font-family, monospace); word-break: break-all; max-height: 80px; overflow: hidden; position: relative; }
+  .var-val.expanded { max-height: none; }
+  .expand-btn { font-size: 10px; color: var(--vscode-textLink-foreground); cursor: pointer; opacity: 0.7; background: none; border: none; padding: 0 2px; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; margin-left: 4px; }
+  .badge-ok { background: rgba(50,200,100,0.2); color: #5db; }
+  .badge-ng { background: rgba(220,60,60,0.2); color: #e88; }
+  .badge-num { background: rgba(100,150,250,0.15); color: #9af; }
+  .badge-named { background: rgba(200,150,50,0.15); color: #ec9; }
+  .empty { padding: 10px 14px; opacity: 0.45; font-style: italic; font-size: 12px; }
+  .hidden { display: none; }
+  .env-row td:first-child { color: var(--vscode-symbolIcon-constantForeground, #4ec9b0); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Variable Inspector</h1>
+  <span class="ts" id="ts">—</span>
+</header>
+<div class="search-bar">
+  <input type="text" id="filter" placeholder="Filter variables…" oninput="applyFilter(this.value)">
+</div>
+
+<details open id="sec-num">
+  <summary>Numbered variables</summary>
+  <table class="var-table" id="tbl-num"><tr class="empty-row"><td class="empty" colspan="2">No numbered variables yet.</td></tr></table>
+</details>
+
+<details open id="sec-named">
+  <summary>Named variables</summary>
+  <table class="var-table" id="tbl-named"><tr class="empty-row"><td class="empty" colspan="2">No named variables yet.</td></tr></table>
+</details>
+
+<details open id="sec-builtin">
+  <summary>Built-in values</summary>
+  <table class="var-table" id="tbl-builtin">
+    <tr><td class="var-name">{$PREV}</td><td class="var-val" id="bv-prev">—</td></tr>
+    <tr><td class="var-name">{$STATUS}</td><td class="var-val" id="bv-status">—</td></tr>
+    <tr><td class="var-name">{$CWD}</td><td class="var-val" id="bv-cwd">—</td></tr>
+  </table>
+</details>
+
+<details id="sec-env">
+  <summary>Environment (session)</summary>
+  <table class="var-table" id="tbl-env"><tr class="empty-row"><td class="empty" colspan="2">No session env vars set.</td></tr></table>
+</details>
+
+<script>
+const vscode = acquireVsCodeApi();
+let lastFilter = '';
+
+function applyFilter(q) {
+  lastFilter = q.toLowerCase();
+  document.querySelectorAll('.var-row').forEach(tr => {
+    const name = tr.dataset.name || '';
+    tr.classList.toggle('hidden', !!q && !name.toLowerCase().includes(lastFilter));
+  });
+}
+
+function renderTable(tbId, rows, badgeClass) {
+  const tb = document.getElementById(tbId);
+  if (!rows.length) {
+    tb.innerHTML = '<tr class="empty-row"><td class="empty" colspan="2">—</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(([k, v]) => {
+    const safe = String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const needExpand = safe.length > 200;
+    return '<tr class="var-row' + (lastFilter && !k.toLowerCase().includes(lastFilter) ? ' hidden' : '') + '" data-name="' + k + '">'
+      + '<td class="var-name"><span class="badge ' + badgeClass + '">' + k + '</span></td>'
+      + '<td class="var-val" id="val-' + k + '">'
+      + (needExpand ? safe.slice(0,200) + '<span class="ellipsis">…</span>' : safe)
+      + (needExpand ? ' <button class="expand-btn" onclick="toggleExpand(this,\'' + k + '\')">more</button>' : '')
+      + '</td></tr>';
+  }).join('');
+}
+
+function toggleExpand(btn, key) {
+  const cell = document.getElementById('val-' + key);
+  cell.classList.toggle('expanded');
+  btn.textContent = cell.classList.contains('expanded') ? 'less' : 'more';
+}
+
+window.addEventListener('message', e => {
+  const msg = e.data;
+  if (msg.type !== 'update') return;
+
+  document.getElementById('ts').textContent = msg.ts ? new Date(msg.ts).toLocaleTimeString() : '';
+
+  renderTable('tbl-num',
+    Object.entries(msg.num || {}).map(([k,v]) => ['{' + k + '}', v]),
+    'badge-num');
+
+  renderTable('tbl-named',
+    Object.entries(msg.named || {}).map(([k,v]) => ['{' + k + '}', v]),
+    'badge-named');
+
+  const statusEl = document.getElementById('bv-status');
+  const code = msg.status ?? 0;
+  statusEl.innerHTML = code + ' <span class="badge ' + (code === 0 ? 'badge-ok' : 'badge-ng') + '">' + (code === 0 ? 'OK' : 'FAIL') + '</span>';
+
+  document.getElementById('bv-prev').textContent = (msg.prev || '').slice(0, 400) || '—';
+  document.getElementById('bv-cwd').textContent  = msg.cwd || '—';
+
+  renderTable('tbl-env',
+    Object.entries(msg.env || {}).map(([k,v]) => [k, v]),
+    'badge-named');
+  document.querySelectorAll('#tbl-env .var-name').forEach(td => td.classList.add('env-row'));
+});
+</script>
+</body>
+</html>`;
+}
+// =============================================================================
+// ② Execution History Browser
+// =============================================================================
+function historyFilePath() {
+    var _a;
+    const folder = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0];
+    const base = folder ? folder.uri.fsPath : (safeHome() || os.tmpdir());
+    return path.join(base, HISTORY_FILE_NAME);
+}
+function loadHistory(context) {
+    try {
+        const p = historyFilePath();
+        if (!fs.existsSync(p)) {
+            return;
+        }
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (Array.isArray(raw)) {
+            historySessions.push(...raw.slice(0, 50));
+        }
+    }
+    catch (_) { }
+}
+function saveHistory() {
+    try {
+        fs.writeFileSync(historyFilePath(), JSON.stringify(historySessions.slice(0, 50), null, 2), 'utf8');
+    }
+    catch (_) { }
+}
+function clearHistory(context) {
+    historySessions.length = 0;
+    saveHistory();
+    if (historyPanel) {
+        postHistoryData();
+    }
+    vscode.window.showInformationMessage('code-lc4ri: history cleared.');
+}
+function showHistoryBrowser(context) {
+    if (historyPanel) {
+        historyPanel.reveal(vscode.ViewColumn.Beside);
+        postHistoryData();
+        return;
+    }
+    historyPanel = vscode.window.createWebviewPanel('lc4riHistory', 'lc4ri: Execution History', vscode.ViewColumn.Beside, { enableScripts: true, retainContextWhenHidden: true });
+    historyPanel.webview.html = buildHistoryHtml();
+    historyPanel.onDidDispose(() => { historyPanel = undefined; }, null, context.subscriptions);
+    // Handle messages from webview (replay / open timeline)
+    historyPanel.webview.onDidReceiveMessage(async (msg) => {
+        if (msg.type === 'openTimeline') {
+            showTimeline(context, msg.sessionId);
+        }
+        if (msg.type === 'clearHistory') {
+            clearHistory(context);
+        }
+    }, null, context.subscriptions);
+    postHistoryData();
+}
+function postHistoryData() {
+    if (!historyPanel) {
+        return;
+    }
+    historyPanel.webview.postMessage({ type: 'history', sessions: historySessions });
+}
+function buildHistoryHtml() {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Execution History</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
+  header { padding: 10px 14px 8px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; align-items: center; gap: 10px; position: sticky; top: 0; background: var(--vscode-editor-background); z-index: 10; }
+  header h1 { font-size: 13px; font-weight: 600; flex: 1; }
+  .toolbar { padding: 6px 14px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; gap: 8px; align-items: center; }
+  .toolbar input { flex: 1; padding: 4px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, #555); border-radius: 3px; font-size: 12px; outline: none; }
+  .toolbar input:focus { border-color: var(--vscode-focusBorder); }
+  .toolbar select { padding: 4px 6px; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, #555); border-radius: 3px; font-size: 12px; }
+  .session { border-bottom: 1px solid var(--vscode-panel-border); }
+  .session-header { padding: 8px 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .session-header:hover { background: var(--vscode-list-hoverBackground); }
+  .session-title { flex: 1; font-weight: 500; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-meta { font-size: 11px; opacity: 0.6; white-space: nowrap; }
+  .ok-count { color: #5db; background: rgba(50,200,100,0.15); padding: 1px 6px; border-radius: 10px; }
+  .ng-count { color: #e88; background: rgba(220,60,60,0.15); padding: 1px 6px; border-radius: 10px; }
+  .session-body { display: none; background: var(--vscode-editor-background); padding: 4px 0; }
+  .session.open .session-body { display: block; }
+  .cmd-row { display: flex; align-items: flex-start; padding: 4px 14px 4px 28px; gap: 8px; }
+  .cmd-row:hover { background: var(--vscode-list-hoverBackground); }
+  .cmd-icon { font-size: 11px; margin-top: 2px; }
+  .cmd-text { flex: 1; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; word-break: break-all; }
+  .cmd-dur { font-size: 11px; opacity: 0.5; white-space: nowrap; }
+  .cmd-code { font-size: 11px; opacity: 0.6; white-space: nowrap; }
+  .btn { padding: 3px 10px; font-size: 11px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; cursor: pointer; }
+  .btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .empty { padding: 24px; text-align: center; opacity: 0.4; font-style: italic; }
+  .hidden { display: none; }
+  .chev { font-size: 10px; transition: transform 0.15s; opacity: 0.5; }
+  .session.open .chev { transform: rotate(90deg); }
+  .profile-badge { font-size: 10px; padding: 1px 6px; background: rgba(100,150,250,0.15); color: var(--vscode-textLink-foreground); border-radius: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Execution History</h1>
+  <button class="btn" onclick="clearAll()">Clear All</button>
+</header>
+<div class="toolbar">
+  <input type="text" id="q" placeholder="Search commands…" oninput="applyFilter()">
+  <select id="statusFilter" onchange="applyFilter()">
+    <option value="">All</option>
+    <option value="ok">✅ OK only</option>
+    <option value="ng">❌ Failed only</option>
+  </select>
+</div>
+<div id="list"><div class="empty">No history yet. Run some commands first.</div></div>
+
+<script>
+const vscode = acquireVsCodeApi();
+let sessions = [];
+
+function dur(ms) { return ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(1) + 's'; }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function applyFilter() {
+  const q = document.getElementById('q').value.toLowerCase();
+  const sf = document.getElementById('statusFilter').value;
+  document.querySelectorAll('.session').forEach(el => {
+    const rows = el.querySelectorAll('.cmd-row');
+    let visible = 0;
+    rows.forEach(r => {
+      const cmd = (r.dataset.cmd || '').toLowerCase();
+      const ok  = r.dataset.ok === '1';
+      const matchQ  = !q  || cmd.includes(q);
+      const matchSf = !sf || (sf === 'ok' ? ok : !ok);
+      r.classList.toggle('hidden', !(matchQ && matchSf));
+      if (matchQ && matchSf) visible++;
+    });
+    el.classList.toggle('hidden', !!q && visible === 0);
+  });
+}
+
+function toggleSession(id) {
+  const el = document.getElementById('s-' + id);
+  if (el) el.classList.toggle('open');
+}
+
+function openTimeline(sessionId) {
+  vscode.postMessage({ type: 'openTimeline', sessionId });
+}
+
+function clearAll() {
+  vscode.postMessage({ type: 'clearHistory' });
+}
+
+function render() {
+  const list = document.getElementById('list');
+  if (!sessions.length) {
+    list.innerHTML = '<div class="empty">No history yet. Run some commands first.</div>';
+    return;
+  }
+  list.innerHTML = sessions.map((s, i) => {
+    const file = s.runbookFile ? s.runbookFile.split(/[/\\\\]/).pop() : '—';
+    const d = s.endTs && s.startTs ? dur(new Date(s.endTs) - new Date(s.startTs)) : '?';
+    const cmds = (s.entries || []).map(e =>
+      '<div class="cmd-row' + (lastFilter(e) ? '' : '') + '" data-cmd="' + esc(e.command) + '" data-ok="' + (e.ok ? '1':'0') + '">'
+      + '<span class="cmd-icon">' + (e.ok ? '✅' : '❌') + '</span>'
+      + '<span class="cmd-text">' + esc(e.command) + '</span>'
+      + '<span class="cmd-dur">' + dur(e.endMs - e.startMs) + '</span>'
+      + '<span class="cmd-code">exit ' + e.code + '</span>'
+      + '</div>'
+    ).join('');
+    return '<div class="session" id="s-' + s.id + '">'
+      + '<div class="session-header" onclick="toggleSession(\'' + s.id + '\')">'
+      + '<span class="chev">▶</span>'
+      + '<div class="session-title">' + esc(file) + '</div>'
+      + '<span class="profile-badge">' + esc(s.profile) + '</span>'
+      + '<span class="ok-count">✅ ' + s.totalOk + '</span>'
+      + (s.totalFail ? '<span class="ng-count">❌ ' + s.totalFail + '</span>' : '')
+      + '<span class="session-meta">' + d + '</span>'
+      + '<button class="btn" onclick="event.stopPropagation();openTimeline(\'' + s.id + '\')">Timeline</button>'
+      + '</div>'
+      + '<div class="session-body">' + (cmds || '<div class="empty" style="padding:8px 14px;">No commands recorded.</div>') + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+function lastFilter(e) { return true; }
+
+window.addEventListener('message', msg => {
+  const d = msg.data;
+  if (d.type === 'history') { sessions = d.sessions || []; render(); }
+});
+</script>
+</body>
+</html>`;
+}
+// =============================================================================
+// ③ Output Block Search Helper (injected into markdown output)
+// =============================================================================
+// The search UI is available as a VS Code command that opens an input box
+// and highlights matches in the active editor's current output block.
+// ③ Output Block Search
+// Called via command palette or CodeLens. Optional `startLine` lets CodeLens
+// pass the opening fence line directly so the user doesn't have to place the
+// cursor manually.
+async function searchOutputBlock(startLine) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        return;
+    }
+    // Capture a non-null reference before the first await so TypeScript
+    // knows it cannot become undefined inside nested functions below.
+    const activeEditor = editor;
+    const q = await vscode.window.showInputBox({
+        prompt: 'Search in output block',
+        placeHolder: 'keyword…',
+        validateInput: v => (v && v.trim().length > 0 ? null : 'Enter a keyword')
+    });
+    if (!q || !q.trim()) {
+        return;
+    }
+    const doc = activeEditor.document;
+    // Determine search origin: use provided line, cursor, or scan from top
+    const origin = startLine !== undefined ? startLine : activeEditor.selection.active.line;
+    let blockStart = -1, blockEnd = -1;
+    // Find the nearest ``` fence at or below origin
+    for (let i = origin; i < doc.lineCount; i++) {
+        if (/^```/.test(doc.lineAt(i).text)) {
+            blockStart = i;
+            break;
+        }
+    }
+    // Also search above if not found below
+    if (blockStart === -1) {
+        for (let i = origin - 1; i >= 0; i--) {
+            if (/^```/.test(doc.lineAt(i).text)) {
+                blockStart = i;
+                break;
+            }
+        }
+    }
+    if (blockStart === -1) {
+        vscode.window.showWarningMessage('code-lc4ri: No output block found near cursor.');
+        return;
+    }
+    for (let i = blockStart + 1; i < doc.lineCount; i++) {
+        if (/^```\s*$/.test(doc.lineAt(i).text)) {
+            blockEnd = i;
+            break;
+        }
+    }
+    if (blockEnd === -1) {
+        blockEnd = doc.lineCount - 1;
+    }
+    // Collect all matches
+    const matches = [];
+    for (let i = blockStart + 1; i < blockEnd; i++) {
+        const text = doc.lineAt(i).text;
+        let idx = text.indexOf(q);
+        while (idx !== -1) {
+            matches.push(new vscode.Range(i, idx, i, idx + q.length));
+            idx = text.indexOf(q, idx + 1);
+        }
+    }
+    if (matches.length === 0) {
+        vscode.window.showInformationMessage(`code-lc4ri: "${q}" not found in output block.`);
+        return;
+    }
+    // Decoration for all matches
+    const decorationType = vscode.window.createTextEditorDecorationType({
+        backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
+        border: '1px solid',
+        borderColor: new vscode.ThemeColor('editor.findMatchHighlightBorder')
+    });
+    // Decoration for current focused match (brighter)
+    const focusType = vscode.window.createTextEditorDecorationType({
+        backgroundColor: new vscode.ThemeColor('editor.findMatchBackground'),
+        border: '1px solid',
+        borderColor: new vscode.ThemeColor('editor.findMatchBorder'),
+        fontWeight: 'bold'
+    });
+    let currentIdx = 0;
+    function revealMatch(idx) {
+        const m = matches[idx];
+        activeEditor.selection = new vscode.Selection(m.start, m.end);
+        activeEditor.revealRange(m, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        // All matches dimly highlighted; current match brightly highlighted
+        activeEditor.setDecorations(decorationType, matches.filter((_, i) => i !== idx));
+        activeEditor.setDecorations(focusType, [m]);
+    }
+    revealMatch(0);
+    // Show navigation message
+    const label = (i) => `${i + 1}/${matches.length}`;
+    const prompt = async () => {
+        const pick = await vscode.window.showInformationMessage(`code-lc4ri: "${q}" — ${label(currentIdx)} match${matches.length > 1 ? 'es' : ''}`, ...(matches.length > 1 ? ['Next ↓', 'Prev ↑'] : []), 'Clear');
+        if (pick === 'Next ↓') {
+            currentIdx = (currentIdx + 1) % matches.length;
+            revealMatch(currentIdx);
+            await prompt();
+        }
+        else if (pick === 'Prev ↑') {
+            currentIdx = (currentIdx - 1 + matches.length) % matches.length;
+            revealMatch(currentIdx);
+            await prompt();
+        }
+        else {
+            decorationType.dispose();
+            focusType.dispose();
+        }
+    };
+    await prompt();
+}
+// =============================================================================
+// ④ Execution Timeline (Waterfall)
+// =============================================================================
+function showTimeline(context, sessionId) {
+    // Determine which entries to show
+    let entries = reportEntries;
+    let title = 'lc4ri: Timeline (current session)';
+    if (sessionId) {
+        const sess = historySessions.find(s => s.id === sessionId);
+        if (sess) {
+            entries = sess.entries;
+            title = `lc4ri: Timeline — ${sess.runbookFile.split(/[/\\]/).pop()}`;
+        }
+    }
+    const panel = vscode.window.createWebviewPanel('lc4riTimeline', title, vscode.ViewColumn.Beside, { enableScripts: true });
+    panel.webview.html = buildTimelineHtml(entries);
+}
+function buildTimelineHtml(entries) {
+    const safeEntries = entries.map(e => ({
+        command: e.command,
+        ok: e.ok,
+        code: e.code,
+        startMs: e.startMs,
+        endMs: e.endMs,
+        isParallel: e.isParallel,
+        parallelGroup: e.parallelGroup,
+        output: e.output.slice(0, 500)
+    }));
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Execution Timeline</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); overflow-x: hidden; }
+  header { padding: 10px 14px 8px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; align-items: center; gap: 10px; position: sticky; top: 0; background: var(--vscode-editor-background); z-index: 10; }
+  header h1 { font-size: 13px; font-weight: 600; flex: 1; }
+  .summary { padding: 8px 14px; border-bottom: 1px solid var(--vscode-panel-border); font-size: 12px; display: flex; gap: 16px; }
+  .summary span { opacity: 0.7; }
+  .summary b { opacity: 1; }
+  #canvas-wrap { padding: 14px; overflow-x: auto; }
+  canvas { display: block; cursor: crosshair; }
+  .tooltip { position: fixed; background: var(--vscode-editorHoverWidget-background, #1e1e1e); border: 1px solid var(--vscode-editorHoverWidget-border, #444); color: var(--vscode-editorHoverWidget-foreground, #ccc); padding: 8px 12px; border-radius: 4px; font-size: 12px; font-family: var(--vscode-editor-font-family, monospace); pointer-events: none; display: none; z-index: 100; max-width: 420px; word-break: break-all; line-height: 1.6; }
+  .legend { padding: 6px 14px 10px; display: flex; gap: 16px; font-size: 11px; opacity: 0.7; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<header><h1>Execution Timeline</h1></header>
+<div class="summary" id="summary"></div>
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#4ec9b0"></div>OK (sequential)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#569cd6"></div>OK (parallel)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f44747"></div>Failed</div>
+  <div class="legend-item"><div class="legend-dot" style="background:rgba(100,100,100,0.3)"></div>Parallel group</div>
+</div>
+<div id="canvas-wrap"><canvas id="cv"></canvas></div>
+<div class="tooltip" id="tip"></div>
+
+<script>
+const RAW = ${JSON.stringify(safeEntries)};
+
+const ROW_H = 34;
+const LABEL_W = 220;
+const PAD = 10;
+const BAR_H = 18;
+const BAR_PAD = (ROW_H - BAR_H) / 2;
+const TICK_H = 24;
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function dur(ms) { return ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(2) + 's'; }
+
+function render() {
+  if (!RAW.length) {
+    document.getElementById('canvas-wrap').innerHTML = '<div style="padding:24px;opacity:0.4;font-style:italic">No entries to display.</div>';
+    return;
+  }
+
+  const minMs = Math.min(...RAW.map(e => e.startMs));
+  const maxMs = Math.max(...RAW.map(e => e.endMs));
+  const totalMs = Math.max(maxMs - minMs, 1);
+
+  // Summary
+  const totalDur = maxMs - minMs;
+  const okCount  = RAW.filter(e => e.ok).length;
+  const ngCount  = RAW.length - okCount;
+  document.getElementById('summary').innerHTML =
+    '<span>Commands: <b>' + RAW.length + '</b></span>' +
+    '<span>Total time: <b>' + dur(totalDur) + '</b></span>' +
+    '<span style="color:#5db">✅ <b>' + okCount + '</b></span>' +
+    (ngCount ? '<span style="color:#e88">❌ <b>' + ngCount + '</b></span>' : '');
+
+  const cv = document.getElementById('cv');
+  const canvasW = Math.max(700, (document.getElementById('canvas-wrap').clientWidth || 800) - 28);
+  const barW = canvasW - LABEL_W - PAD * 2;
+
+  // Group parallel rows together
+  const groups = {};
+  RAW.forEach(e => { if (e.isParallel && e.parallelGroup >= 0) { groups[e.parallelGroup] = (groups[e.parallelGroup] || []).concat(e); } });
+
+  const canvasH = TICK_H + PAD + RAW.length * ROW_H + PAD;
+  cv.width  = canvasW;
+  cv.height = canvasH;
+
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, canvasW, canvasH);
+
+  const isDark = document.body.style.colorScheme !== 'light';
+  const textColor     = getComputedStyle(document.body).getPropertyValue('--vscode-foreground') || '#ccc';
+  const subColor      = 'rgba(150,150,150,0.6)';
+  const gridColor     = 'rgba(150,150,150,0.15)';
+  const parallelBg    = 'rgba(100,100,200,0.08)';
+
+  // Tick marks
+  const ticks = 6;
+  ctx.fillStyle = subColor;
+  ctx.font = '10px ' + (getComputedStyle(document.body).fontFamily || 'monospace');
+  ctx.textAlign = 'left';
+  for (let t = 0; t <= ticks; t++) {
+    const x = LABEL_W + PAD + (barW * t / ticks);
+    const ms = (totalMs * t / ticks);
+    const label = dur(ms);
+    ctx.fillStyle = subColor;
+    ctx.textAlign = t === ticks ? 'right' : (t === 0 ? 'left' : 'center');
+    ctx.fillText(label, x, 14);
+    ctx.strokeStyle = gridColor;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(x, TICK_H); ctx.lineTo(x, canvasH - PAD); ctx.stroke();
+  }
+
+  // Parallel group backgrounds
+  Object.entries(groups).forEach(([gid, gevents]) => {
+    const gStart = Math.min(...gevents.map(e => e.startMs));
+    const gEnd   = Math.max(...gevents.map(e => e.endMs));
+    const xStart = LABEL_W + PAD + ((gStart - minMs) / totalMs) * barW;
+    const xEnd   = LABEL_W + PAD + ((gEnd   - minMs) / totalMs) * barW;
+    const firstIdx = RAW.findIndex(e => e.isParallel && e.parallelGroup === parseInt(gid));
+    const lastIdx  = RAW.reduce((acc, e, i) => e.isParallel && e.parallelGroup === parseInt(gid) ? i : acc, firstIdx);
+    const yTop    = TICK_H + PAD + firstIdx * ROW_H;
+    const yBottom = TICK_H + PAD + (lastIdx + 1) * ROW_H;
+    ctx.fillStyle = parallelBg;
+    ctx.fillRect(xStart - 2, yTop, (xEnd - xStart) + 4, yBottom - yTop);
+    ctx.strokeStyle = 'rgba(86,156,214,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(xStart - 2, yTop, (xEnd - xStart) + 4, yBottom - yTop);
+  });
+
+  // Bars
+  RAW.forEach((e, i) => {
+    const y = TICK_H + PAD + i * ROW_H;
+    const xStart = LABEL_W + PAD + ((e.startMs - minMs) / totalMs) * barW;
+    const width  = Math.max(2, ((e.endMs - e.startMs) / totalMs) * barW);
+
+    // Label
+    const label = (e.command.length > 28 ? e.command.slice(0, 26) + '…' : e.command);
+    ctx.fillStyle = textColor;
+    ctx.font = '12px ' + (getComputedStyle(document.body).fontFamily || 'monospace');
+    ctx.textAlign = 'left';
+    ctx.fillText(label, PAD, y + BAR_PAD + BAR_H / 2 + 4);
+
+    // Bar
+    const color = !e.ok ? '#f44747' : (e.isParallel ? '#569cd6' : '#4ec9b0');
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    roundRect(ctx, xStart, y + BAR_PAD, width, BAR_H, 3);
+    ctx.fill();
+
+    // Duration label inside bar if wide enough
+    const dLabel = dur(e.endMs - e.startMs);
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.font = '10px ' + (getComputedStyle(document.body).fontFamily || 'monospace');
+    ctx.textAlign = 'left';
+    if (width > 40) { ctx.fillText(dLabel, xStart + 4, y + BAR_PAD + BAR_H - 4); }
+  });
+
+  // Tooltip
+  const tip = document.getElementById('tip');
+  cv.addEventListener('mousemove', ev => {
+    const rect = cv.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
+    const row = Math.floor((my - TICK_H - PAD) / ROW_H);
+    if (row < 0 || row >= RAW.length) { tip.style.display = 'none'; return; }
+    const e = RAW[row];
+    const xStart = LABEL_W + PAD + ((e.startMs - minMs) / totalMs) * barW;
+    const width  = Math.max(2, ((e.endMs - e.startMs) / totalMs) * barW);
+    if (mx < xStart - 10 || mx > xStart + width + 10) { tip.style.display = 'none'; return; }
+
+    tip.innerHTML =
+      '<b>' + esc(e.command) + '</b><br>' +
+      (e.ok ? '✅ OK' : '❌ Failed (exit ' + e.code + ')') + '<br>' +
+      'Duration: <b>' + dur(e.endMs - e.startMs) + '</b>' +
+      (e.isParallel ? '<br>⚡ Parallel group ' + e.parallelGroup : '') +
+      (e.output ? '<br><br><span style="opacity:0.7">' + esc(e.output.slice(0,200)) + '</span>' : '');
+    tip.style.display = 'block';
+    tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - 440) + 'px';
+    tip.style.top  = Math.min(ev.clientY + 10, window.innerHeight - 160) + 'px';
+  });
+  cv.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+render();
+window.addEventListener('resize', render);
+</script>
+</body>
+</html>`;
 }
 //# sourceMappingURL=extension.js.map

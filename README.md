@@ -670,3 +670,140 @@ MIT License
 
 <!-- CREATED_BY_LEADYOU_README_GENERATOR -->
 
+
+<br>
+
+---
+
+# v1.4: New features
+
+Four new panels and tooling features have been added for visibility and debuggability of runbook execution. **All existing documents and settings continue to work without any changes.**
+
+## 1. Variable Inspector Panel
+
+Open a live side panel that shows every variable in the current session at a glance.
+
+**How to open:** Command Palette → `code-lc4ri: Show Variable Inspector` (`extension.lc4ri.showVarInspector`), or set a keybinding.
+
+The panel opens beside the active editor and stays in sync as commands run. It is divided into four sections:
+
+| Section | Contents |
+|---|---|
+| **Numbered variables** | `{1}` – `{9}` and their current values |
+| **Named variables** | Every `{name}` bound via `→ {name}` or `prompt:` |
+| **Built-in values** | `{$PREV}`, `{$STATUS}`, `{$CWD}` updated in real-time |
+| **Environment (session)** | Variables injected via `export:` or `.env` loading |
+
+The filter box at the top narrows the list by name instantly. Long values are truncated with a **more / less** toggle. The timestamp in the top-right corner shows when the panel was last refreshed.
+
+The panel refreshes automatically after every command execution and after every `prompt:` input, so you never need to reopen it.
+
+## 2. Execution History Browser
+
+Browse, search, and re-examine past execution sessions without leaving VS Code.
+
+**How to open:** Command Palette → `code-lc4ri: Show Execution History` (`extension.lc4ri.showHistory`).
+
+### What is recorded
+
+Every time `Run from cursor` or `▶ Run` (CodeLens) is triggered, a new session is created. When execution finishes, the session is saved to **`.lc4ri-history.json`** in the workspace root (or `$HOME` if no workspace is open). Up to **50 sessions** are retained; older sessions are dropped automatically.
+
+Each session records:
+
+- Runbook filename, start/end timestamps, active profile
+- Per-command: command text, exit code, duration, OK/fail flag
+
+### Using the panel
+
+- **Expand / collapse** a session row to see its individual commands.
+- Use the **search box** to filter by command text across all sessions.
+- Use the **status filter** (`All / ✅ OK only / ❌ Failed only`) to narrow by result.
+- Click **Timeline** on any session row to open the waterfall view for that session (see feature 4).
+- Click **Clear All** to wipe the history file and reset the list.
+
+### Commands
+
+| Command | Description |
+|---|---|
+| `extension.lc4ri.showHistory` | Open the history browser panel |
+| `extension.lc4ri.clearHistory` | Clear all saved history |
+
+## 3. Output Block Search
+
+Search inside the output code block that follows a command, with inline highlight and next/previous navigation — without leaving the Markdown file.
+
+**How to use:**
+
+- Click the **🔍 Search output** CodeLens that appears above every output code block (`` ``` `` … `` ``` ``), **or**
+- Run `code-lc4ri: Search Output Block` (`extension.lc4ri.searchOutput`) from the Command Palette with the cursor inside or above an output block.
+
+An input box appears. Type a keyword and press Enter.
+
+### Behaviour
+
+- All matches are highlighted using VS Code's standard find-match colours.
+- The current match is shown in a brighter colour; the others are dimmed.
+- An information toast shows `"keyword" — N/M matches` with **Next ↓** and **Prev ↑** buttons to step through each match.
+- Clicking **Clear** (or dismissing the toast) removes all decorations.
+- If the keyword is not found, a warning message is shown and no decorations are applied.
+
+### CodeLens integration
+
+The `🔍 Search output` and `🗑 Clear` lenses appear on the opening fence line of every output block. They are shown alongside the existing `▶ Run` and `Dry-run` lenses and can be disabled globally with `"lc4ri.showCodeLens": false`.
+
+```
+🔍 Search output  🗑 Clear
+```
+```
+[ ls -la ] Mon Jun 01 14:32:00 2026
+total 48
+drwxr-xr-x 12 user user 4096 ...
+```
+
+## 4. Execution Timeline (Waterfall)
+
+Visualise the duration and sequence of every command in a session as an interactive waterfall chart.
+
+**How to open:**
+
+- Command Palette → `code-lc4ri: Show Execution Timeline` (`extension.lc4ri.showTimeline`) to see the **current session**.
+- Click **Timeline** on any row in the History Browser to see a **past session**.
+
+### Reading the chart
+
+Each command is drawn as a horizontal bar. The bar starts at the command's wall-clock start time and ends at its finish time, relative to the beginning of the session.
+
+| Colour | Meaning |
+|---|---|
+| 🟢 Teal | Sequential command, exit 0 |
+| 🔵 Blue | Parallel command (`[parallel]`), exit 0 |
+| 🔴 Red | Failed command (any exit code ≠ 0) |
+| Grey background | Parallel group — commands that ran with `Promise.all` |
+
+Parallel groups are indicated with a translucent box spanning all commands in the group. A group number is shown in the tooltip.
+
+### Tooltip
+
+Hover over any bar to see a tooltip with:
+
+- Command text
+- OK / Failed status and exit code
+- Duration in ms or seconds
+- Parallel group number (if applicable)
+- Up to 200 characters of the command's output
+
+### Summary bar
+
+The header area shows the total number of commands, the wall-clock duration of the whole session, and the ✅ / ❌ counts.
+
+Duration labels (e.g. `1.23s`, `450ms`) are printed inside bars that are wide enough to accommodate them.
+
+## 5. New commands summary (v1.4)
+
+| Command | Description |
+|---|---|
+| `extension.lc4ri.showVarInspector` | Open the Variable Inspector side panel |
+| `extension.lc4ri.showHistory` | Open the Execution History browser |
+| `extension.lc4ri.clearHistory` | Clear all saved execution history |
+| `extension.lc4ri.searchOutput` | Search inside the nearest output block |
+| `extension.lc4ri.showTimeline` | Open the Timeline waterfall for the current session |
