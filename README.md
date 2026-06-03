@@ -659,22 +659,6 @@ Markdown
   "enabled": true
 }
 ```
-
-# LICENSE
-
-MIT License
-
-# Contributors
-
-- [yasutakatou](https://github.com/yasutakatou)
-
-<!-- CREATED_BY_LEADYOU_README_GENERATOR -->
-
-
-<br>
-
----
-
 # v1.4: New features
 
 Four new panels and tooling features have been added for visibility and debuggability of runbook execution. **All existing documents and settings continue to work without any changes.**
@@ -807,3 +791,11 @@ Duration labels (e.g. `1.23s`, `450ms`) are printed inside bars that are wide en
 | `extension.lc4ri.clearHistory` | Clear all saved execution history |
 | `extension.lc4ri.searchOutput` | Search inside the nearest output block |
 | `extension.lc4ri.showTimeline` | Open the Timeline waterfall for the current session |
+
+# LICENSE
+
+MIT License
+
+# Contributors
+
+- [yasutakatou](https://github.com/yasutakatou)
