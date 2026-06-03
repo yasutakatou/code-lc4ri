@@ -92,9 +92,11 @@ let persistentVars: { num: Record<string, string>; named: Record<string, string>
     named: {}
 };
 
+// Most recent complete variable snapshot (for poll-based webview refresh)
+let lastKnownVars: Variables = { num: {}, named: {}, prev: '', status: 0 };
+
 // ① Variable Inspector Panel
 let varInspectorPanel: vscode.WebviewPanel | undefined;
-let varInspectorEmitter: vscode.EventEmitter<void> | undefined;
 
 // ② Execution History Browser
 let historyPanel: vscode.WebviewPanel | undefined;
@@ -153,7 +155,6 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(statusBarItem);
 
     codeLensEmitter = new vscode.EventEmitter<void>();
-    varInspectorEmitter = new vscode.EventEmitter<void>();
 
     const codeLensProvider = new LC4RICodeLensProvider(codeLensEmitter.event);
     context.subscriptions.push(
@@ -203,11 +204,11 @@ export function deactivate() {
     outputChannel?.dispose();
     statusBarItem?.dispose();
     codeLensEmitter?.dispose();
-    varInspectorEmitter?.dispose();
     varInspectorPanel?.dispose();
     historyPanel?.dispose();
     currentEnv = {};
     persistentVars = { num: {}, named: {} };
+    lastKnownVars = { num: {}, named: {}, prev: '', status: 0 };
 }
 
 // =============================================================================
@@ -459,6 +460,15 @@ function generateRandomAlpha(length: number): string {
     const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
     let result = '';
     for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
+
+function generateNonce(): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < 32; i++) {
         result += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return result;
@@ -732,7 +742,7 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
             dryRun: opts.dryRun,
             progress,
             token,
-            vars: { num: { ...persistentVars.num }, named: { ...persistentVars.named }, prev: '', status: 0 },
+            vars: { num: {}, named: {}, prev: '', status: 0 },
             consoles: '',
             lastRenderedConsoles: '',
             outputBlockStartLine: 0,
@@ -809,8 +819,8 @@ interface RunContext {
 async function runLines(lines: string[], ctx: RunContext): Promise<void> {
     for (let i = 0; i < lines.length; i++) {
         if (ctx.token.isCancellationRequested) {
-            Object.assign(persistentVars.num, ctx.vars.num);
-            Object.assign(persistentVars.named, ctx.vars.named);
+            persistentVars.num   = { ...ctx.vars.num };
+            persistentVars.named = { ...ctx.vars.named };
             break;
         }
 
@@ -825,8 +835,8 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
 
         if (horizonCheck(line)) {
             ctx.horizonFlag = ctx.nowLine;
-            Object.assign(persistentVars.num, ctx.vars.num);
-            Object.assign(persistentVars.named, ctx.vars.named);
+            persistentVars.num   = { ...ctx.vars.num };
+            persistentVars.named = { ...ctx.vars.named };
             break;
         }
 
@@ -1023,14 +1033,14 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
                 ctx.startLine = ctx.nowLine;
             } else {
                 ctx.endLine = ctx.nowLine;
-                Object.assign(persistentVars.num, ctx.vars.num);
-                Object.assign(persistentVars.named, ctx.vars.named);
+                persistentVars.num   = { ...ctx.vars.num };
+                persistentVars.named = { ...ctx.vars.named };
                 break;
             }
         }
 
-        Object.assign(persistentVars.num, ctx.vars.num);
-        Object.assign(persistentVars.named, ctx.vars.named);
+        persistentVars.num   = { ...ctx.vars.num };
+        persistentVars.named = { ...ctx.vars.named };
         ctx.nowLine++;
     }
 }
@@ -1068,6 +1078,7 @@ async function handleNumberedAssignment(hit: { idx: string; body: string }, ctx:
         } else {
             ctx.vars.status = 1;
         }
+        refreshVarInspector(ctx.vars);
         return;
     }
 
@@ -1079,6 +1090,7 @@ async function handleNumberedAssignment(hit: { idx: string; body: string }, ctx:
             if (bindName) { ctx.vars.named[bindName] = expRes.output; }
             ctx.vars.prev = expRes.output; ctx.vars.status = 0;
         } else { ctx.vars.status = 1; }
+        refreshVarInspector(ctx.vars);
         return;
     }
 
@@ -1162,6 +1174,7 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
             ctx.consoles += `${cdRes.output}\n[cd failed]\n`;
             ctx.vars.status = 1; ctx.execCount = 0;
         }
+        refreshVarInspector(ctx.vars);
         return;
     }
     if (isPureExportCommand(finalCmd)) {
@@ -1176,6 +1189,7 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
             ctx.consoles += `${expRes.output}\n[export failed]\n`;
             ctx.vars.status = 1; ctx.execCount = 0;
         }
+        refreshVarInspector(ctx.vars);
         return;
     }
 
@@ -1216,6 +1230,9 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
         ctx.vars.prev = res.stdout;
         ctx.vars.status = res.code;
         if (bindName) { ctx.vars.named[bindName] = (res.stdout || res.stderr).replace(/\r?\n+$/, ''); }
+
+        // ① Refresh variable inspector after every command so bindings are visible immediately
+        refreshVarInspector(ctx.vars);
 
         pushReport({
             command: finalCmd, rendered: finalCmd,
@@ -1301,6 +1318,7 @@ async function runOrParallel(firstLine: string, depth: number, lines: string[], 
         parallelLines.push(nextLine); extraNowLine += nextCont.consumed; j += nextCont.consumed;
     }
     await runParallelGroup(parallelLines, depth, ctx);
+    refreshVarInspector(ctx.vars);
     return { newIdx: j - 1, extraNowLine };
 }
 
@@ -1522,9 +1540,19 @@ function escapeHtml(s: string): string { return s.replace(/[&<>"']/g, c => ({ '&
 // =============================================================================
 
 function showVarInspector(context: vscode.ExtensionContext): void {
+    const html = buildVarInspectorHtml({
+        num:    { ...persistentVars.num },
+        named:  { ...persistentVars.named },
+        prev:   lastKnownVars.prev,
+        status: lastKnownVars.status,
+        cwd:    getCurrentCwd(),
+        env:    { ...currentEnv },
+        ts:     new Date().toISOString()
+    });
+
     if (varInspectorPanel) {
         varInspectorPanel.reveal(vscode.ViewColumn.Beside);
-        postVarData({ num: persistentVars.num, named: persistentVars.named, prev: '', status: 0 });
+        varInspectorPanel.webview.html = html;
         return;
     }
 
@@ -1534,34 +1562,66 @@ function showVarInspector(context: vscode.ExtensionContext): void {
         vscode.ViewColumn.Beside,
         { enableScripts: true, retainContextWhenHidden: true }
     );
-
-    varInspectorPanel.webview.html = buildVarInspectorHtml();
+    varInspectorPanel.webview.html = html;
     varInspectorPanel.onDidDispose(() => { varInspectorPanel = undefined; }, null, context.subscriptions);
-
-    // Send current vars immediately
-    postVarData({ num: persistentVars.num, named: persistentVars.named, prev: '', status: 0 });
 }
 
 function refreshVarInspector(vars: Variables): void {
+    // Replace (not merge) so the panel always shows exactly what the current
+    // run has defined — no stale values from previous runs bleed through.
+    persistentVars.num   = { ...vars.num };
+    persistentVars.named = { ...vars.named };
+    lastKnownVars = {
+        num:    { ...vars.num },
+        named:  { ...vars.named },
+        prev:   vars.prev   ?? '',
+        status: vars.status ?? 0
+    };
     if (!varInspectorPanel) { return; }
-    postVarData(vars);
-}
-
-function postVarData(vars: Variables): void {
-    if (!varInspectorPanel) { return; }
-    varInspectorPanel.webview.postMessage({
-        type: 'update',
-        num: vars.num,
-        named: vars.named,
-        prev: vars.prev,
-        status: vars.status,
-        cwd: getCurrentCwd(),
-        env: currentEnv,
-        ts: new Date().toISOString()
+    // Rebuild the entire HTML with current data — no JS message-passing needed.
+    varInspectorPanel.webview.html = buildVarInspectorHtml({
+        num:    { ...vars.num },
+        named:  { ...vars.named },
+        prev:   vars.prev   ?? '',
+        status: vars.status ?? 0,
+        cwd:    getCurrentCwd(),
+        env:    { ...currentEnv },
+        ts:     new Date().toISOString()
     });
 }
 
-function buildVarInspectorHtml(): string {
+export function buildVarInspectorHtml(snapshot?: {
+    num: Record<string, string>;
+    named: Record<string, string>;
+    prev: string;
+    status: number;
+    cwd: string;
+    env: Record<string, string>;
+    ts: string;
+}): string {
+    const nonce = generateNonce();
+    const num    = snapshot?.num    ?? {};
+    const named  = snapshot?.named  ?? {};
+    const prev   = snapshot?.prev   ?? '';
+    const status = snapshot?.status ?? 0;
+    const cwd    = snapshot?.cwd    ?? '';
+    const env    = snapshot?.env    ?? {};
+    const ts     = snapshot?.ts     ?? '';
+
+    const h = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    const varRows = (entries: [string, string][], badge: string, labelFn: (k: string) => string, emptyMsg: string): string => {
+        if (!entries.length) { return `<tr class="empty-row"><td class="empty" colspan="2">${emptyMsg}</td></tr>`; }
+        return entries.map(([k, v]) => {
+            const label = labelFn(k);
+            const safe  = h(String(v).slice(0, 500));
+            return `<tr class="var-row" data-name="${h(label)}"><td class="var-name"><span class="badge ${badge}">${h(label)}</span></td><td class="var-val">${safe}</td></tr>`;
+        }).join('');
+    };
+
+    const statusBadge = `${status} <span class="badge ${status === 0 ? 'badge-ok' : 'badge-ng'}">${status === 0 ? 'OK' : 'FAIL'}</span>`;
+    const tsLabel     = ts ? new Date(ts).toLocaleTimeString() : '—';
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1577,19 +1637,17 @@ function buildVarInspectorHtml(): string {
   .search-bar { padding: 6px 14px; border-bottom: 1px solid var(--vscode-panel-border); }
   .search-bar input { width: 100%; padding: 4px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, #555); border-radius: 3px; font-size: 12px; outline: none; }
   .search-bar input:focus { border-color: var(--vscode-focusBorder); }
-  section { border-bottom: 1px solid var(--vscode-panel-border); }
-  section summary { padding: 7px 14px; cursor: pointer; font-weight: 600; font-size: 12px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
-  section summary::-webkit-details-marker { display: none; }
-  section summary::before { content: '▶'; font-size: 9px; transition: transform 0.15s; }
-  section[open] summary::before { transform: rotate(90deg); }
+  details { border-bottom: 1px solid var(--vscode-panel-border); }
+  details summary { padding: 7px 14px; cursor: pointer; font-weight: 600; font-size: 12px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '▶'; font-size: 9px; transition: transform 0.15s; }
+  details[open] summary::before { transform: rotate(90deg); }
   .var-table { width: 100%; border-collapse: collapse; }
   .var-table td { padding: 4px 14px; vertical-align: top; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.1)); }
   .var-table tr:last-child td { border-bottom: none; }
   .var-table tr:hover td { background: var(--vscode-list-hoverBackground); }
   .var-name { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-symbolIcon-variableForeground, #9CDCFE); font-weight: 500; white-space: nowrap; width: 120px; }
-  .var-val { font-family: var(--vscode-editor-font-family, monospace); word-break: break-all; max-height: 80px; overflow: hidden; position: relative; }
-  .var-val.expanded { max-height: none; }
-  .expand-btn { font-size: 10px; color: var(--vscode-textLink-foreground); cursor: pointer; opacity: 0.7; background: none; border: none; padding: 0 2px; }
+  .var-val { font-family: var(--vscode-editor-font-family, monospace); word-break: break-all; }
   .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; margin-left: 4px; }
   .badge-ok { background: rgba(50,200,100,0.2); color: #5db; }
   .badge-ng { background: rgba(220,60,60,0.2); color: #e88; }
@@ -1597,13 +1655,12 @@ function buildVarInspectorHtml(): string {
   .badge-named { background: rgba(200,150,50,0.15); color: #ec9; }
   .empty { padding: 10px 14px; opacity: 0.45; font-style: italic; font-size: 12px; }
   .hidden { display: none; }
-  .env-row td:first-child { color: var(--vscode-symbolIcon-constantForeground, #4ec9b0); }
 </style>
 </head>
 <body>
 <header>
   <h1>Variable Inspector</h1>
-  <span class="ts" id="ts">—</span>
+  <span class="ts" id="ts">${tsLabel}</span>
 </header>
 <div class="search-bar">
   <input type="text" id="filter" placeholder="Filter variables…" oninput="applyFilter(this.value)">
@@ -1611,90 +1668,42 @@ function buildVarInspectorHtml(): string {
 
 <details open id="sec-num">
   <summary>Numbered variables</summary>
-  <table class="var-table" id="tbl-num"><tr class="empty-row"><td class="empty" colspan="2">No numbered variables yet.</td></tr></table>
+  <table class="var-table" id="tbl-num">
+    ${varRows(Object.entries(num), 'badge-num', k => `{${k}}`, 'No numbered variables yet.')}
+  </table>
 </details>
 
 <details open id="sec-named">
   <summary>Named variables</summary>
-  <table class="var-table" id="tbl-named"><tr class="empty-row"><td class="empty" colspan="2">No named variables yet.</td></tr></table>
+  <table class="var-table" id="tbl-named">
+    ${varRows(Object.entries(named), 'badge-named', k => `{${k}}`, 'No named variables yet.')}
+  </table>
 </details>
 
 <details open id="sec-builtin">
   <summary>Built-in values</summary>
   <table class="var-table" id="tbl-builtin">
-    <tr><td class="var-name">{$PREV}</td><td class="var-val" id="bv-prev">—</td></tr>
-    <tr><td class="var-name">{$STATUS}</td><td class="var-val" id="bv-status">—</td></tr>
-    <tr><td class="var-name">{$CWD}</td><td class="var-val" id="bv-cwd">—</td></tr>
+    <tr><td class="var-name">{$PREV}</td><td class="var-val" id="bv-prev">${prev ? h(String(prev).slice(0, 400)) : '—'}</td></tr>
+    <tr><td class="var-name">{$STATUS}</td><td class="var-val" id="bv-status">${statusBadge}</td></tr>
+    <tr><td class="var-name">{$CWD}</td><td class="var-val" id="bv-cwd">${cwd ? h(cwd) : '—'}</td></tr>
   </table>
 </details>
 
 <details id="sec-env">
   <summary>Environment (session)</summary>
-  <table class="var-table" id="tbl-env"><tr class="empty-row"><td class="empty" colspan="2">No session env vars set.</td></tr></table>
+  <table class="var-table" id="tbl-env">
+    ${varRows(Object.entries(env), 'badge-named', k => k, 'No session env vars set.')}
+  </table>
 </details>
 
-<script>
-const vscode = acquireVsCodeApi();
-let lastFilter = '';
-
+<script nonce="${nonce}">
 function applyFilter(q) {
-  lastFilter = q.toLowerCase();
-  document.querySelectorAll('.var-row').forEach(tr => {
-    const name = tr.dataset.name || '';
-    tr.classList.toggle('hidden', !!q && !name.toLowerCase().includes(lastFilter));
+  var ql = q.toLowerCase();
+  document.querySelectorAll('.var-row').forEach(function(tr) {
+    var name = (tr.dataset.name || '').toLowerCase();
+    tr.classList.toggle('hidden', !!ql && !name.includes(ql));
   });
 }
-
-function renderTable(tbId, rows, badgeClass) {
-  const tb = document.getElementById(tbId);
-  if (!rows.length) {
-    tb.innerHTML = '<tr class="empty-row"><td class="empty" colspan="2">—</td></tr>';
-    return;
-  }
-  tb.innerHTML = rows.map(([k, v]) => {
-    const safe = String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const needExpand = safe.length > 200;
-    return '<tr class="var-row' + (lastFilter && !k.toLowerCase().includes(lastFilter) ? ' hidden' : '') + '" data-name="' + k + '">'
-      + '<td class="var-name"><span class="badge ' + badgeClass + '">' + k + '</span></td>'
-      + '<td class="var-val" id="val-' + k + '">'
-      + (needExpand ? safe.slice(0,200) + '<span class="ellipsis">…</span>' : safe)
-      + (needExpand ? ' <button class="expand-btn" onclick="toggleExpand(this,\'' + k + '\')">more</button>' : '')
-      + '</td></tr>';
-  }).join('');
-}
-
-function toggleExpand(btn, key) {
-  const cell = document.getElementById('val-' + key);
-  cell.classList.toggle('expanded');
-  btn.textContent = cell.classList.contains('expanded') ? 'less' : 'more';
-}
-
-window.addEventListener('message', e => {
-  const msg = e.data;
-  if (msg.type !== 'update') return;
-
-  document.getElementById('ts').textContent = msg.ts ? new Date(msg.ts).toLocaleTimeString() : '';
-
-  renderTable('tbl-num',
-    Object.entries(msg.num || {}).map(([k,v]) => ['{' + k + '}', v]),
-    'badge-num');
-
-  renderTable('tbl-named',
-    Object.entries(msg.named || {}).map(([k,v]) => ['{' + k + '}', v]),
-    'badge-named');
-
-  const statusEl = document.getElementById('bv-status');
-  const code = msg.status ?? 0;
-  statusEl.innerHTML = code + ' <span class="badge ' + (code === 0 ? 'badge-ok' : 'badge-ng') + '">' + (code === 0 ? 'OK' : 'FAIL') + '</span>';
-
-  document.getElementById('bv-prev').textContent = (msg.prev || '').slice(0, 400) || '—';
-  document.getElementById('bv-cwd').textContent  = msg.cwd || '—';
-
-  renderTable('tbl-env',
-    Object.entries(msg.env || {}).map(([k,v]) => [k, v]),
-    'badge-named');
-  document.querySelectorAll('#tbl-env .var-name').forEach(td => td.classList.add('env-row'));
-});
 </script>
 </body>
 </html>`;
@@ -1735,9 +1744,11 @@ function clearHistory(context: vscode.ExtensionContext): void {
 }
 
 function showHistoryBrowser(context: vscode.ExtensionContext): void {
+    const html = buildHistoryHtml(historySessions);
+
     if (historyPanel) {
         historyPanel.reveal(vscode.ViewColumn.Beside);
-        postHistoryData();
+        historyPanel.webview.html = html;
         return;
     }
 
@@ -1747,29 +1758,58 @@ function showHistoryBrowser(context: vscode.ExtensionContext): void {
         vscode.ViewColumn.Beside,
         { enableScripts: true, retainContextWhenHidden: true }
     );
-
-    historyPanel.webview.html = buildHistoryHtml();
+    historyPanel.webview.html = html;
     historyPanel.onDidDispose(() => { historyPanel = undefined; }, null, context.subscriptions);
 
-    // Handle messages from webview (replay / open timeline)
     historyPanel.webview.onDidReceiveMessage(async (msg) => {
-        if (msg.type === 'openTimeline') {
-            showTimeline(context, msg.sessionId);
-        }
-        if (msg.type === 'clearHistory') {
-            clearHistory(context);
-        }
+        if (msg.type === 'openTimeline') { showTimeline(context, msg.sessionId); }
+        if (msg.type === 'clearHistory')  { clearHistory(context); }
     }, null, context.subscriptions);
-
-    postHistoryData();
 }
 
 function postHistoryData(): void {
     if (!historyPanel) { return; }
-    historyPanel.webview.postMessage({ type: 'history', sessions: historySessions });
+    historyPanel.webview.html = buildHistoryHtml(historySessions);
 }
 
-function buildHistoryHtml(): string {
+function buildHistoryHtml(sessions: HistorySession[]): string {
+    const nonce = generateNonce();
+    const h = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const durStr = (ms: number) => ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+
+    const renderSession = (s: HistorySession): string => {
+        const file = s.runbookFile ? (s.runbookFile.split(/[/\\]/).pop() ?? '—') : '—';
+        const d    = s.endTs && s.startTs
+            ? durStr(new Date(s.endTs).getTime() - new Date(s.startTs).getTime())
+            : '?';
+        const cmds = s.entries.length
+            ? s.entries.map(e =>
+                `<div class="cmd-row" data-cmd="${h(e.command)}" data-ok="${e.ok ? '1' : '0'}">`
+                + `<span class="cmd-icon">${e.ok ? '✅' : '❌'}</span>`
+                + `<span class="cmd-text">${h(e.command)}</span>`
+                + `<span class="cmd-dur">${durStr(e.endMs - e.startMs)}</span>`
+                + `<span class="cmd-code">exit ${e.code}</span>`
+                + `</div>`
+              ).join('')
+            : '<div class="empty" style="padding:8px 14px;">No commands recorded.</div>';
+
+        return `<details class="session" id="s-${h(s.id)}">`
+            + `<summary class="session-header">`
+            + `<span class="session-title">${h(file)}</span>`
+            + `<span class="profile-badge">${h(s.profile)}</span>`
+            + `<span class="ok-count">✅ ${s.totalOk}</span>`
+            + (s.totalFail ? `<span class="ng-count">❌ ${s.totalFail}</span>` : '')
+            + `<span class="session-meta">${d}</span>`
+            + `<button class="btn tlbtn" data-sid="${h(s.id)}" onclick="event.preventDefault()">Timeline</button>`
+            + `</summary>`
+            + `<div class="session-body">${cmds}</div>`
+            + `</details>`;
+    };
+
+    const listHtml = sessions.length
+        ? sessions.map(renderSession).join('')
+        : '<div class="empty">No history yet. Run some commands first.</div>';
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1785,15 +1825,15 @@ function buildHistoryHtml(): string {
   .toolbar input { flex: 1; padding: 4px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, #555); border-radius: 3px; font-size: 12px; outline: none; }
   .toolbar input:focus { border-color: var(--vscode-focusBorder); }
   .toolbar select { padding: 4px 6px; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, #555); border-radius: 3px; font-size: 12px; }
-  .session { border-bottom: 1px solid var(--vscode-panel-border); }
-  .session-header { padding: 8px 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; }
-  .session-header:hover { background: var(--vscode-list-hoverBackground); }
+  details.session { border-bottom: 1px solid var(--vscode-panel-border); }
+  details.session summary { padding: 8px 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+  details.session summary::-webkit-details-marker { display: none; }
+  details.session summary:hover { background: var(--vscode-list-hoverBackground); }
   .session-title { flex: 1; font-weight: 500; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-meta { font-size: 11px; opacity: 0.6; white-space: nowrap; }
   .ok-count { color: #5db; background: rgba(50,200,100,0.15); padding: 1px 6px; border-radius: 10px; }
   .ng-count { color: #e88; background: rgba(220,60,60,0.15); padding: 1px 6px; border-radius: 10px; }
-  .session-body { display: none; background: var(--vscode-editor-background); padding: 4px 0; }
-  .session.open .session-body { display: block; }
+  .session-body { background: var(--vscode-editor-background); padding: 4px 0; }
   .cmd-row { display: flex; align-items: flex-start; padding: 4px 14px 4px 28px; gap: 8px; }
   .cmd-row:hover { background: var(--vscode-list-hoverBackground); }
   .cmd-icon { font-size: 11px; margin-top: 2px; }
@@ -1804,15 +1844,13 @@ function buildHistoryHtml(): string {
   .btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .empty { padding: 24px; text-align: center; opacity: 0.4; font-style: italic; }
   .hidden { display: none; }
-  .chev { font-size: 10px; transition: transform 0.15s; opacity: 0.5; }
-  .session.open .chev { transform: rotate(90deg); }
   .profile-badge { font-size: 10px; padding: 1px 6px; background: rgba(100,150,250,0.15); color: var(--vscode-textLink-foreground); border-radius: 10px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Execution History</h1>
-  <button class="btn" onclick="clearAll()">Clear All</button>
+  <button class="btn" id="clear-btn">Clear All</button>
 </header>
 <div class="toolbar">
   <input type="text" id="q" placeholder="Search commands…" oninput="applyFilter()">
@@ -1822,84 +1860,39 @@ function buildHistoryHtml(): string {
     <option value="ng">❌ Failed only</option>
   </select>
 </div>
-<div id="list"><div class="empty">No history yet. Run some commands first.</div></div>
+<div id="list">${listHtml}</div>
 
-<script>
-const vscode = acquireVsCodeApi();
-let sessions = [];
+<script nonce="${nonce}">
+var api = null;
+try { api = acquireVsCodeApi(); } catch(e) {}
+function send(msg) { if (api) api.postMessage(msg); }
 
-function dur(ms) { return ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(1) + 's'; }
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+var clearBtn = document.getElementById('clear-btn');
+if (clearBtn) clearBtn.onclick = function() { send({ type: 'clearHistory' }); };
+
+document.querySelectorAll('.tlbtn').forEach(function(btn) {
+  btn.addEventListener('click', function(ev) {
+    ev.stopPropagation();
+    send({ type: 'openTimeline', sessionId: this.dataset.sid });
+  });
+});
 
 function applyFilter() {
-  const q = document.getElementById('q').value.toLowerCase();
-  const sf = document.getElementById('statusFilter').value;
-  document.querySelectorAll('.session').forEach(el => {
-    const rows = el.querySelectorAll('.cmd-row');
-    let visible = 0;
-    rows.forEach(r => {
-      const cmd = (r.dataset.cmd || '').toLowerCase();
-      const ok  = r.dataset.ok === '1';
-      const matchQ  = !q  || cmd.includes(q);
-      const matchSf = !sf || (sf === 'ok' ? ok : !ok);
-      r.classList.toggle('hidden', !(matchQ && matchSf));
-      if (matchQ && matchSf) visible++;
+  var q  = document.getElementById('q').value.toLowerCase();
+  var sf = document.getElementById('statusFilter').value;
+  document.querySelectorAll('details.session').forEach(function(el) {
+    var rows = el.querySelectorAll('.cmd-row');
+    var visible = 0;
+    rows.forEach(function(r) {
+      var cmd = (r.dataset.cmd || '').toLowerCase();
+      var ok  = r.dataset.ok === '1';
+      var show = (!q || cmd.includes(q)) && (!sf || (sf === 'ok' ? ok : !ok));
+      r.style.display = show ? '' : 'none';
+      if (show) visible++;
     });
-    el.classList.toggle('hidden', !!q && visible === 0);
+    el.style.display = (q && visible === 0) ? 'none' : '';
   });
 }
-
-function toggleSession(id) {
-  const el = document.getElementById('s-' + id);
-  if (el) el.classList.toggle('open');
-}
-
-function openTimeline(sessionId) {
-  vscode.postMessage({ type: 'openTimeline', sessionId });
-}
-
-function clearAll() {
-  vscode.postMessage({ type: 'clearHistory' });
-}
-
-function render() {
-  const list = document.getElementById('list');
-  if (!sessions.length) {
-    list.innerHTML = '<div class="empty">No history yet. Run some commands first.</div>';
-    return;
-  }
-  list.innerHTML = sessions.map((s, i) => {
-    const file = s.runbookFile ? s.runbookFile.split(/[/\\\\]/).pop() : '—';
-    const d = s.endTs && s.startTs ? dur(new Date(s.endTs) - new Date(s.startTs)) : '?';
-    const cmds = (s.entries || []).map(e =>
-      '<div class="cmd-row' + (lastFilter(e) ? '' : '') + '" data-cmd="' + esc(e.command) + '" data-ok="' + (e.ok ? '1':'0') + '">'
-      + '<span class="cmd-icon">' + (e.ok ? '✅' : '❌') + '</span>'
-      + '<span class="cmd-text">' + esc(e.command) + '</span>'
-      + '<span class="cmd-dur">' + dur(e.endMs - e.startMs) + '</span>'
-      + '<span class="cmd-code">exit ' + e.code + '</span>'
-      + '</div>'
-    ).join('');
-    return '<div class="session" id="s-' + s.id + '">'
-      + '<div class="session-header" onclick="toggleSession(\'' + s.id + '\')">'
-      + '<span class="chev">▶</span>'
-      + '<div class="session-title">' + esc(file) + '</div>'
-      + '<span class="profile-badge">' + esc(s.profile) + '</span>'
-      + '<span class="ok-count">✅ ' + s.totalOk + '</span>'
-      + (s.totalFail ? '<span class="ng-count">❌ ' + s.totalFail + '</span>' : '')
-      + '<span class="session-meta">' + d + '</span>'
-      + '<button class="btn" onclick="event.stopPropagation();openTimeline(\'' + s.id + '\')">Timeline</button>'
-      + '</div>'
-      + '<div class="session-body">' + (cmds || '<div class="empty" style="padding:8px 14px;">No commands recorded.</div>') + '</div>'
-      + '</div>';
-  }).join('');
-}
-
-function lastFilter(e) { return true; }
-
-window.addEventListener('message', msg => {
-  const d = msg.data;
-  if (d.type === 'history') { sessions = d.sessions || []; render(); }
-});
 </script>
 </body>
 </html>`;
@@ -1920,9 +1913,10 @@ async function searchOutputBlock(startLine?: number): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) { return; }
 
-    // Capture a non-null reference before the first await so TypeScript
-    // knows it cannot become undefined inside nested functions below.
-    const activeEditor: vscode.TextEditor = editor;
+    // Capture in a const with a non-nullable type annotation.
+    // TypeScript's strictNullChecks can lose narrowing across async boundaries
+    // and inside nested functions, so we pin the reference here.
+    const activeEditor: vscode.TextEditor = editor as vscode.TextEditor;
 
     const q = await vscode.window.showInputBox({
         prompt: 'Search in output block',

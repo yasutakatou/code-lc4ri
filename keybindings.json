@@ -1,7 +1,22 @@
 [
-	{
-		"key": "ctrl+shift+a",
-		"command": "extension.lc4ri",
-		"args": "code-lc4ri: LC4RI for VS Code"
-	}
+  {
+    "key": "ctrl+shift+a",
+    "command": "extension.lc4ri",
+    "when": "editorTextFocus"
+  },
+  {
+    "key": "ctrl+shift+w",
+    "command": "extension.lc4ri.showVarInspector",
+    "when": "editorTextFocus"
+  },
+  {
+    "key": "ctrl+shift+r",
+    "command": "extension.lc4ri.showHistory",
+    "when": "editorTextFocus"
+  },
+  {
+    "key": "ctrl+shift+e",
+    "command": "extension.lc4ri.showTimeline",
+    "when": "editorTextFocus"
+  }
 ]

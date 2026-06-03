@@ -253,5 +253,53 @@ ext.setCurrentEnv({});
 truthy('setCurrentEnv is not shared ref', envSnap.FOO === 'bar');
 eq('cleared env is empty', ext.getCurrentEnv(), {});
 
+console.log('getPersistentVars / setPersistentVars');
+ext.setPersistentVars({ num: {}, named: {} });
+eq('initial persistent vars empty', ext.getPersistentVars(), { num: {}, named: {} });
+ext.setPersistentVars({ num: { '1': 'host' }, named: { host: 'myhost' } });
+eq('setPersistentVars sets values', ext.getPersistentVars(), { num: { '1': 'host' }, named: { host: 'myhost' } });
+const pvSnap = ext.getPersistentVars();
+ext.setPersistentVars({ num: {}, named: {} });
+truthy('getPersistentVars is not shared ref (num)', pvSnap.num['1'] === 'host');
+truthy('getPersistentVars is not shared ref (named)', pvSnap.named.host === 'myhost');
+eq('cleared persistent vars', ext.getPersistentVars(), { num: {}, named: {} });
+
+console.log('buildVarInspectorHtml — empty snapshot');
+const html = ext.buildVarInspectorHtml();
+truthy('html is non-empty string',     typeof html === 'string' && html.length > 0);
+truthy('contains tbl-num',             html.includes('id="tbl-num"'));
+truthy('contains tbl-named',           html.includes('id="tbl-named"'));
+truthy('contains tbl-builtin',         html.includes('id="tbl-builtin"'));
+truthy('contains tbl-env',             html.includes('id="tbl-env"'));
+truthy('contains bv-prev',             html.includes('id="bv-prev"'));
+truthy('contains bv-status',           html.includes('id="bv-status"'));
+truthy('contains bv-cwd',              html.includes('id="bv-cwd"'));
+truthy('contains filter input',        html.includes('id="filter"'));
+truthy('uses <details> not <section>', html.includes('<details') && !html.includes('<section'));
+truthy('CSS uses details selector',    html.includes('details summary') && html.includes('details[open]'));
+truthy('no dead section CSS',          !html.includes('section summary') && !html.includes('section[open]'));
+truthy('no dead env-row class',        !html.includes('.env-row'));
+truthy('contains applyFilter fn',      html.includes('function applyFilter'));
+truthy('no acquireVsCodeApi call',     !html.includes('acquireVsCodeApi'));
+truthy('no postMessage call',          !html.includes('postMessage'));
+truthy('shows empty-num message',      html.includes('No numbered variables yet.'));
+truthy('shows empty-named message',    html.includes('No named variables yet.'));
+
+console.log('buildVarInspectorHtml — with snapshot');
+const snap = ext.buildVarInspectorHtml({
+    num: { '1': 'host42', '2': 'prod' },
+    named: { greeting: 'hello', target: 'world' },
+    prev: 'last output\n', status: 0, cwd: '/tmp', env: { MY_ENV: 'val' }, ts: new Date().toISOString()
+});
+truthy('snap: num var {1} rendered',   snap.includes('{1}') && snap.includes('host42'));
+truthy('snap: num var {2} rendered',   snap.includes('{2}') && snap.includes('prod'));
+truthy('snap: named {greeting}',       snap.includes('{greeting}') && snap.includes('hello'));
+truthy('snap: named {target}',         snap.includes('{target}') && snap.includes('world'));
+truthy('snap: prev rendered',          snap.includes('last output'));
+truthy('snap: status OK badge',        snap.includes('badge-ok') && snap.includes('OK'));
+truthy('snap: cwd rendered',           snap.includes('/tmp'));
+truthy('snap: env MY_ENV rendered',    snap.includes('MY_ENV') && snap.includes('val'));
+truthy('snap: ts rendered (not —)',    !snap.includes('<span class="ts" id="ts">—</span>'));
+
 console.log(`\n${passed} passed / ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
