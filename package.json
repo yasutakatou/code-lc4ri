@@ -2,7 +2,7 @@
     "name": "code-lc4ri",
     "displayName": "code-lc4ri",
     "description": "LC4RI for VS Code — Markdown driven reproducible operations",
-    "version": "1.4.1",
+    "version": "1.5.0",
     "publisher": "yasutakatou",
     "repository": "https://github.com/yasutakatou/code-lc4ri",
     "engines": {
@@ -19,6 +19,8 @@
     "bin": {
         "code-lc4ri": "./bin/code-lc4ri.js"
     },
+    "extensionKind": ["workspace", "ui"],
+    "enabledApiProposals": ["terminalDataWriteEvent"],
     "capabilities": {
         "untrustedWorkspaces": {
             "supported": "limited",
@@ -72,30 +74,15 @@
                     "default": 10000,
                     "description": "Command timeout in milliseconds."
                 },
-                "lc4ri.template": {
-                    "type": "object",
-                    "default": {},
-                    "description": "Per-OS legacy template, e.g. { \"linux\": \"ssh u@h {COMMAND}\" }."
-                },
                 "lc4ri.profiles": {
                     "type": "object",
                     "default": {},
-                    "description": "Named execution profiles selectable from the status bar."
+                    "description": "Named execution profiles selectable from the status bar. Each entry wraps the command: { \"profile\": \"ssh user@host {COMMAND}\" }."
                 },
                 "lc4ri.changeWord": {
                     "type": "object",
                     "default": {},
                     "description": "Pre→post substitution map applied to every command."
-                },
-                "lc4ri.toUtf8": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Auto-detect output encoding and convert to UTF-8."
-                },
-                "lc4ri.toTerminal": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "If true, send the command to the active terminal instead of capturing output."
                 },
                 "lc4ri.outputFormat": {
                     "type": "string",
@@ -139,14 +126,6 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Show inline ▶ Run / Dry-run actions on list lines."
-                },
-                "lc4ri.shell": {
-                    "type": [
-                        "string",
-                        "null"
-                    ],
-                    "default": null,
-                    "description": "Shell binary to use (null = system default)."
                 }
             }
         }
@@ -167,10 +146,7 @@
         "eslint": "^8.50.0",
         "typescript": "^6.0.3"
     },
-    "dependencies": {
-        "@types/encoding-japanese": "^1.0.15",
-        "encoding-japanese": "^2.0.0"
-    },
+    "dependencies": {},
     "overrides": {
         "minimatch": "^9.0.7"
     }

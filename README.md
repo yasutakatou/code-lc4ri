@@ -792,6 +792,41 @@ Duration labels (e.g. `1.23s`, `450ms`) are printed inside bars that are wide en
 | `extension.lc4ri.searchOutput` | Search inside the nearest output block |
 | `extension.lc4ri.showTimeline` | Open the Timeline waterfall for the current session |
 
+## 6. Changes in v1.5.0 — Terminal-first execution
+
+v1.5.0 fully commits to running all commands through the visible VS Code terminal.
+Background shell execution (`spawn`) has been removed entirely.
+
+### What changed
+
+| Area | v1.4 and earlier | v1.5.0 |
+|---|---|---|
+| Command execution | Background `spawn` (default) or terminal (opt-in via `toTerminal`) | Always the active terminal |
+| Output capture | stdout/stderr pipes for background mode | `onDidWriteTerminalData` + sentinel markers |
+| Remote support | Background mode did not work in AWS CloudShell | Sentinel mode works in any terminal including CloudShell custom PTY |
+| Removed settings | `lc4ri.toTerminal`, `lc4ri.shell`, `lc4ri.template`, `lc4ri.toUtf8` | — |
+| Kept settings | `lc4ri.profiles`, `lc4ri.changeWord`, `lc4ri.timeout`, security settings | All kept |
+
+### New behaviour for `cd` and `export`
+
+Both commands now run in the active terminal (via `execViaTerminal`) instead of a hidden subprocess.  
+The extension still tracks the working directory and exported variables for variable substitution.
+
+### AWS CloudShell support
+
+The sentinel capture strategy (`onDidWriteTerminalData` proposed API) is required for custom PTY terminals like AWS CloudShell.  
+Launch VS Code with the flag below to enable it:
+
+```
+code --enable-proposed-api yasutakatou.code-lc4ri
+```
+
+Without the flag the extension falls back to the temp-file polling strategy (works for local and Remote SSH but not CloudShell).
+
+### Removed dependencies
+
+`encoding-japanese` has been removed from the runtime dependencies.
+
 # LICENSE
 
 MIT License

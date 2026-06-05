@@ -1,0 +1,695 @@
+[
+  {
+    "id": "session-1780655343573",
+    "startTs": "2026-06-05T10:29:03.573Z",
+    "endTs": "2026-06-05T10:29:08.713Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "\naws-nuke  aws-nuke-v3.64.2-linux-amd64.tar.gz  config  LICENSE  README.md  setup_db.sh  setup_web.sh  yasutakatou.pem",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:29:08 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655343574,
+        "endMs": 1780655348602,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "find",
+        "rendered": "find",
+        "output": "\n.\n./.bash_logout\n./yasutakatou.pem\n./.zshrc\n./aws-nuke\n./.bash_profile\n./.bash_history\n./setup_db.sh\n./.viminfo\n./LICENSE\n./.local\n./.local/share\n./.local/share/powershell\n./.local/share/powershell/Modules\n./.vimrc\n./.wget-hsts\n./config\n./config/nuke-config.yaml\n./.config\n./.config/powershell\n./.config/powershell/Microsoft.PowerShell_profile.ps1\n./aws-nuke-v3.64.2-linux-amd64.tar.gz\n./README.md\n./.bashrc\n./setup_web.sh\n./.zprofile\n./.lesshst",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:29:08 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655348602,
+        "endMs": 1780655348629,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "df",
+        "rendered": "df",
+        "output": "\nFilesystem     1K-blocks    Used Available Use% Mounted on\noverlay         16337788 5735784   9746760  38% /\ntmpfs              65536       0     65536   0% /dev\nshm                65536       0     65536   0% /dev/shm\n/dev/nvme1n1    16337788 5735784   9746760  38% /home\n/dev/loop0        996780  338888    589080  37% /home/cloudshell-user\n/dev/nvme0n1p1  31379436 5428680  25950756  18% /aws/mde/mde",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:29:08 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655348629,
+        "endMs": 1780655348652,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "ifconfig",
+        "rendered": "ifconfig",
+        "output": "\ndocker0: flags=4099<UP,BROADCAST,MULTICAST>  mtu 1500\n        inet 172.17.0.1  netmask 255.255.0.0  broadcast 172.17.255.255\n        ether 02:42:84:3a:da:4c  txqueuelen 0  (Ethernet)\n        RX packets 0  bytes 0 (0.0 B)\n        RX errors 0  dropped 0  overruns 0  frame 0\n        TX packets 0  bytes 0 (0.0 B)\n        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0\neth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\n        inet 172.31.255.194  netmask 255.255.255.192  broadcast 172.31.255.255\n        ether 02:42:ac:1f:ff:c2  txqueuelen 0  (Ethernet)\n        RX packets 16  bytes 1296 (1.2 KiB)\n        RX errors 0  dropped 0  overruns 0  frame 0\n        TX packets 0  bytes 0 (0.0 B)\n        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0\nlo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536\n        inet 127.0.0.1  netmask 255.0.0.0\n        loop  txqueuelen 1000  (Local Loopback)\n        RX packets 0  bytes 0 (0.0 B)\n        RX errors 0  dropped 0  overruns 0  frame 0\n        TX packets 0  bytes 0 (0.0 B)\n        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:29:08 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655348652,
+        "endMs": 1780655348686,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "uname -a",
+        "rendered": "uname -a",
+        "output": "\nLinux ip-10-133-92-95.ap-northeast-1.compute.internal 6.1.172-216.329.amzn2023.x86_64 #1 SMP PREEMPT_DYNAMIC Wed May 20 06:31:34 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:29:08 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655348686,
+        "endMs": 1780655348711,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 5,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780655314857",
+    "startTs": "2026-06-05T10:28:34.857Z",
+    "endTs": "2026-06-05T10:28:35.067Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nREADME.md\t\tnode_modules\t\tpackage-lock.json\ttest\nbin\t\t\tout\t\t\tpackage.json\t\ttsconfig.json\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:28:34 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655314859,
+        "endMs": 1780655314912,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "find",
+        "rendered": "find",
+        "output": "usage: find [-H | -L | -P] [-EXdsx] [-f path] path ... [expression]\n       find [-H | -L | -P] [-EXdsx] -f path [path ...] [expression]\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:28:34 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655314913,
+        "endMs": 1780655314952,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "df",
+        "rendered": "df",
+        "output": "Filesystem     512-blocks      Used Available Capacity iused      ifree %iused  Mounted on\n/dev/disk3s1s1  965492904  24548960 743091240     4%  458725 3715456200    0%   /\ndevfs                 399       399         0   100%     692          0  100%   /dev\n/dev/disk3s6    965492904        40 743091240     1%       0 3715456200    0%   /System/Volumes/VM\n/dev/disk3s2    965492904  17854104 743091240     3%    1528 3715456200    0%   /System/Volumes/Preboot\n/dev/disk3s4    965492904      6728 743091240     1%      62 3715456200    0%   /System/Volumes/Update\n/dev/disk1s2      1126400     12328   1086192     2%       1    5430960    0%   /System/Volumes/xarts\n/dev/disk1s1      1126400     12032   1086192     2%      40    5430960    0%   /System/Volumes/iSCPreboot\n/dev/disk1s3      1126400      6040   1086192     1%     101    5430960    0%   /System/Volumes/Hardware\n/dev/disk3s5    965492904 176528888 743091240    20%  989820 3715456200    0%   /System/Volumes/Data\nmap auto_home           0         0         0   100%       0          0     -   /System/Volumes/Data/home\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:28:34 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655314952,
+        "endMs": 1780655314995,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "ifconfig",
+        "rendered": "ifconfig",
+        "output": "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\toptions=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>\n\tinet 127.0.0.1 netmask 0xff000000\n\tinet6 ::1 prefixlen 128 \n\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1 \n\tnd6 options=201<PERFORMNUD,DAD>\ngif0: flags=8010<POINTOPOINT,MULTICAST> mtu 1280\nstf0: flags=0<> mtu 1280\nanpi0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether 52:fb:d8:dd:fb:c9\n\tmedia: none\n\tstatus: inactive\nanpi1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether 52:fb:d8:dd:fb:ca\n\tmedia: none\n\tstatus: inactive\nanpi3: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether 52:fb:d8:dd:fb:cc\n\tmedia: none\n\tstatus: inactive\nen4: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether 52:fb:d8:dd:fb:a9\n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: none\n\tstatus: inactive\nen5: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether 52:fb:d8:dd:fb:aa\n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: none\n\tstatus: inactive\nen6: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether 52:fb:d8:dd:fb:ac\n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: none\n\tstatus: inactive\nen1: flags=8963<UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1500\n\toptions=460<TSO4,TSO6,CHANNEL_IO>\n\tether 36:c9:47:7e:43:c0\n\tmedia: autoselect <full-duplex>\n\tstatus: inactive\nen2: flags=8963<UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1500\n\toptions=460<TSO4,TSO6,CHANNEL_IO>\n\tether 36:c9:47:7e:43:c4\n\tmedia: autoselect <full-duplex>\n\tstatus: inactive\nen3: flags=8963<UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1500\n\toptions=460<TSO4,TSO6,CHANNEL_IO>\n\tether 36:c9:47:7e:43:cc\n\tmedia: autoselect <full-duplex>\n\tstatus: inactive\nbridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=63<RXCSUM,TXCSUM,TSO4,TSO6>\n\tether 36:c9:47:7e:43:c0\n\tConfiguration:\n\t\tid 0:0:0:0:0:0 priority 0 hellotime 0 fwddelay 0\n\t\tmaxage 0 holdcnt 0 proto stp maxaddr 100 timeout 1200\n\t\troot id 0:0:0:0:0:0 priority 0 ifcost 0 port 0\n\t\tipfilter disabled flags 0x0\n\tmember: en1 flags=3<LEARNING,DISCOVER>\n\t        ifmaxaddr 0 port 10 priority 0 path cost 0\n\tmember: en2 flags=3<LEARNING,DISCOVER>\n\t        ifmaxaddr 0 port 11 priority 0 path cost 0\n\tmember: en3 flags=3<LEARNING,DISCOVER>\n\t        ifmaxaddr 0 port 12 priority 0 path cost 0\n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: <unknown type>\n\tstatus: inactive\nap1: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether 92:81:c0:8e:77:cd\n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: autoselect (none)\nen0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=6460<TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>\n\tether 0e:a2:0e:67:78:e1\n\tinet6 fe80::1c5a:d8de:cbbb:19b7%en0 prefixlen 64 secured scopeid 0xe \n\tinet 192.168.0.129 netmask 0xffffff00 broadcast 192.168.0.255\n\tinet6 2407:c800:2f23:2db:10ea:7e40:a384:df21 prefixlen 64 autoconf secured \n\tinet6 2407:c800:2f23:2db:44e0:c6cc:fa5a:9bd5 prefixlen 64 autoconf temporary \n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: autoselect\n\tstatus: active\nawdl0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=6460<TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>\n\tether fa:25:f3:aa:da:45\n\tinet6 fe80::f825:f3ff:feaa:da45%awdl0 prefixlen 64 scopeid 0x10 \n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: autoselect\n\tstatus: active\nllw0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\toptions=400<CHANNEL_IO>\n\tether fa:25:f3:aa:da:45\n\tinet6 fe80::f825:f3ff:feaa:da45%llw0 prefixlen 64 scopeid 0x11 \n\tnd6 options=201<PERFORMNUD,DAD>\n\tmedia: autoselect (none)\nutun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500\n\tinet6 fe80::829d:1876:a6d6:fbb5%utun0 prefixlen 64 scopeid 0x12 \n\tnd6 options=201<PERFORMNUD,DAD>\nutun1: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n\tinet6 fe80::289a:98e5:fdd8:27d9%utun1 prefixlen 64 scopeid 0x13 \n\tnd6 options=201<PERFORMNUD,DAD>\nutun2: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 2000\n\tinet6 fe80::d7bc:9cba:799c:a87f%utun2 prefixlen 64 scopeid 0x14 \n\tnd6 options=201<PERFORMNUD,DAD>\nutun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1000\n\tinet6 fe80::ce81:b1c:bd2c:69e%utun3 prefixlen 64 scopeid 0x15 \n\tnd6 options=201<PERFORMNUD,DAD>\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:28:35 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655314995,
+        "endMs": 1780655315034,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "uname -a",
+        "rendered": "uname -a",
+        "output": "Darwin KFLYC0D7RHYasutaka-Kato.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:29 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8142 arm64\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 19:28:35 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780655315034,
+        "endMs": 1780655315065,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 5,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780644583798",
+    "startTs": "2026-06-05T07:29:43.798Z",
+    "endTs": "2026-06-05T07:29:45.801Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname -a",
+        "rendered": "uname -a",
+        "output": "",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:29:45 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780644583799,
+        "endMs": 1780644585801,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780644560937",
+    "startTs": "2026-06-05T07:29:20.937Z",
+    "endTs": "2026-06-05T07:29:30.805Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname -a",
+        "rendered": "uname -a",
+        "output": "",
+        "code": 130,
+        "ts": "Fri Jun 05 2026 16:29:30 GMT+0900 (日本標準時)",
+        "ok": false,
+        "startMs": 1780644560939,
+        "endMs": 1780644570781,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 0,
+    "totalFail": 1
+  },
+  {
+    "id": "session-1780644378146",
+    "startTs": "2026-06-05T07:26:18.146Z",
+    "endTs": "2026-06-05T07:26:20.149Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname",
+        "rendered": "uname",
+        "output": "",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:26:20 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780644378147,
+        "endMs": 1780644380148,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780644357426",
+    "startTs": "2026-06-05T07:25:57.426Z",
+    "endTs": "2026-06-05T07:25:59.429Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:25:59 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780644357427,
+        "endMs": 1780644359429,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780644343405",
+    "startTs": "2026-06-05T07:25:43.405Z",
+    "endTs": "2026-06-05T07:25:43.459Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname",
+        "rendered": "uname",
+        "output": "Darwin\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:25:43 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780644343406,
+        "endMs": 1780644343456,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780644338343",
+    "startTs": "2026-06-05T07:25:38.343Z",
+    "endTs": "2026-06-05T07:25:38.415Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tcode-lc4ri-1.4.1.vsix\tout\t\t\tpackage.json\t\ttsconfig.json\nREADME.md\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nbin\t\t\tnode_modules\t\tpackage-lock.json\ttest\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:25:38 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780644338345,
+        "endMs": 1780644338411,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643999101",
+    "startTs": "2026-06-05T07:19:59.101Z",
+    "endTs": "2026-06-05T07:20:01.103Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname",
+        "rendered": "uname",
+        "output": "",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:20:01 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643999101,
+        "endMs": 1780644001103,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643994424",
+    "startTs": "2026-06-05T07:19:54.424Z",
+    "endTs": "2026-06-05T07:19:56.426Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:19:56 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643994424,
+        "endMs": 1780643996425,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643969084",
+    "startTs": "2026-06-05T07:19:29.084Z",
+    "endTs": "2026-06-05T07:19:29.130Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname",
+        "rendered": "uname",
+        "output": "Darwin\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:19:29 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643969084,
+        "endMs": 1780643969129,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643960647",
+    "startTs": "2026-06-05T07:19:20.647Z",
+    "endTs": "2026-06-05T07:19:20.686Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tcode-lc4ri-1.4.1.vsix\tout\t\t\tpackage.json\t\ttsconfig.json\nREADME.md\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nbin\t\t\tnode_modules\t\tpackage-lock.json\ttest\n%                                                                                                                                                       \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:19:20 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643960648,
+        "endMs": 1780643960684,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643938334",
+    "startTs": "2026-06-05T07:18:58.334Z",
+    "endTs": "2026-06-05T07:19:00.339Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname",
+        "rendered": "uname",
+        "output": "",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:19:00 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643938335,
+        "endMs": 1780643940336,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643930867",
+    "startTs": "2026-06-05T07:18:50.867Z",
+    "endTs": "2026-06-05T07:18:52.870Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:18:52 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643930868,
+        "endMs": 1780643932870,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643906774",
+    "startTs": "2026-06-05T07:18:26.774Z",
+    "endTs": "2026-06-05T07:18:26.856Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tcode-lc4ri-1.4.1.vsix\tout\t\t\tpackage.json\t\ttsconfig.json\nREADME.md\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nbin\t\t\tnode_modules\t\tpackage-lock.json\ttest\n%                                                                                                                                     \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:18:26 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643906776,
+        "endMs": 1780643906821,
+        "isParallel": false,
+        "parallelGroup": -1
+      },
+      {
+        "command": "uname",
+        "rendered": "uname",
+        "output": "Darwin\n%                                                                                                                                     \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:18:26 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643906821,
+        "endMs": 1780643906854,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 2,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643642734",
+    "startTs": "2026-06-05T07:14:02.734Z",
+    "endTs": "2026-06-05T07:14:02.734Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [],
+    "totalOk": 0,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643619516",
+    "startTs": "2026-06-05T07:13:39.516Z",
+    "endTs": "2026-06-05T07:13:44.623Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tcode-lc4ri-1.4.1.vsix\tout\t\t\tpackage.json\t\ttsconfig.json\nREADME.md\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nbin\t\t\tnode_modules\t\tpackage-lock.json\ttest\n%                                                                                                                                     \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:13:44 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643619517,
+        "endMs": 1780643624621,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643601533",
+    "startTs": "2026-06-05T07:13:21.533Z",
+    "endTs": "2026-06-05T07:13:21.581Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tcode-lc4ri-1.4.1.vsix\tout\t\t\tpackage.json\t\ttsconfig.json\nREADME.md\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nbin\t\t\tnode_modules\t\tpackage-lock.json\ttest\n%                                                                                                                                     \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:13:21 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643601534,
+        "endMs": 1780643601579,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643568759",
+    "startTs": "2026-06-05T07:12:48.759Z",
+    "endTs": "2026-06-05T07:12:48.813Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname -a",
+        "rendered": "uname -a",
+        "output": "Darwin KFLYC0D7RHYasutaka-Kato.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:29 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8142 arm64\n%                                                                                                                                     \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:12:48 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643568759,
+        "endMs": 1780643568808,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643562355",
+    "startTs": "2026-06-05T07:12:42.355Z",
+    "endTs": "2026-06-05T07:12:42.450Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tcode-lc4ri-1.4.1.vsix\tout\t\t\tpackage.json\t\ttsconfig.json\nREADME.md\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nbin\t\t\tnode_modules\t\tpackage-lock.json\ttest\n%                                                                                                                                     \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:12:42 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643562356,
+        "endMs": 1780643562448,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643544826",
+    "startTs": "2026-06-05T07:12:24.826Z",
+    "endTs": "2026-06-05T07:12:29.930Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\t\t\tcode-lc4ri-1.4.1.vsix\tout\t\t\tpackage.json\t\ttsconfig.json\nREADME.md\t\tkeybindings.json\tout-test\t\tsrc\t\t\ttsconfig.test.json\nbin\t\t\tnode_modules\t\tpackage-lock.json\ttest\n%                                                                                                                                     \n ",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:12:29 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643544828,
+        "endMs": 1780643549924,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643476904",
+    "startTs": "2026-06-05T07:11:16.904Z",
+    "endTs": "2026-06-05T07:11:16.922Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname -a",
+        "rendered": "uname -a",
+        "output": "Darwin KFLYC0D7RHYasutaka-Kato.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:29 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8142 arm64\n",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:11:16 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643476905,
+        "endMs": 1780643476919,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643468972",
+    "startTs": "2026-06-05T07:11:08.972Z",
+    "endTs": "2026-06-05T07:11:08.989Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\nREADME.md\nbin\ncode-lc4ri-1.4.1.vsix\nkeybindings.json\nnode_modules\nout\nout-test\npackage-lock.json\npackage.json\nsrc\ntest\ntsconfig.json\ntsconfig.test.json\n",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:11:08 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643468972,
+        "endMs": 1780643468987,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643457784",
+    "startTs": "2026-06-05T07:10:57.784Z",
+    "endTs": "2026-06-05T07:10:57.807Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\nREADME.md\nbin\ncode-lc4ri-1.4.1.vsix\nkeybindings.json\nnode_modules\nout\nout-test\npackage-lock.json\npackage.json\nsrc\ntest\ntsconfig.json\ntsconfig.test.json\n",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:10:57 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643457785,
+        "endMs": 1780643457801,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643429524",
+    "startTs": "2026-06-05T07:10:29.524Z",
+    "endTs": "2026-06-05T07:10:29.552Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "uname -a",
+        "rendered": "uname -a",
+        "output": "Darwin KFLYC0D7RHYasutaka-Kato.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:29 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8142 arm64\n",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:10:29 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643429525,
+        "endMs": 1780643429550,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  },
+  {
+    "id": "session-1780643412289",
+    "startTs": "2026-06-05T07:10:12.289Z",
+    "endTs": "2026-06-05T07:10:12.351Z",
+    "profile": "(none)",
+    "runbookFile": "Untitled-1",
+    "entries": [
+      {
+        "command": "ls",
+        "rendered": "ls",
+        "output": "LICENSE\nREADME.md\nbin\ncode-lc4ri-1.4.1.vsix\nkeybindings.json\nnode_modules\nout\nout-test\npackage-lock.json\npackage.json\nsrc\ntest\ntsconfig.json\ntsconfig.test.json\n",
+        "code": 0,
+        "ts": "Fri Jun 05 2026 16:10:12 GMT+0900 (日本標準時)",
+        "ok": true,
+        "startMs": 1780643412291,
+        "endMs": 1780643412346,
+        "isParallel": false,
+        "parallelGroup": -1
+      }
+    ],
+    "totalOk": 1,
+    "totalFail": 0
+  }
+]

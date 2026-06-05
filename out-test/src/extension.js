@@ -88,6 +88,7 @@ const reportEntries = [];
 let codeLensEmitter;
 let currentCwd = undefined;
 let currentEnv = {};
+let lc4riTerminal; // unused placeholder kept for deactivate cleanup
 let persistentVars = {
     num: {},
     named: {}
@@ -178,6 +179,7 @@ function deactivate() {
     codeLensEmitter === null || codeLensEmitter === void 0 ? void 0 : codeLensEmitter.dispose();
     varInspectorPanel === null || varInspectorPanel === void 0 ? void 0 : varInspectorPanel.dispose();
     historyPanel === null || historyPanel === void 0 ? void 0 : historyPanel.dispose();
+    lc4riTerminal = undefined;
     currentEnv = {};
     persistentVars = { num: {}, named: {} };
     lastKnownVars = { num: {}, named: {}, prev: '', status: 0 };
@@ -603,6 +605,7 @@ function convToUTF(buf, cfg) {
     }
 }
 function cancelAll() {
+    var _a;
     for (const p of Array.from(runningProcs)) {
         try {
             p.kill('SIGTERM');
@@ -610,7 +613,225 @@ function cancelAll() {
         catch (_) { }
     }
     runningProcs.clear();
+    // Send Ctrl+C to the active terminal if in terminal mode
+    (_a = vscode.window.activeTerminal) === null || _a === void 0 ? void 0 : _a.sendText('\x03', false);
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine('[lc4ri] all running commands cancelled');
+}
+// =============================================================================
+// Terminal execution mode
+// =============================================================================
+/** Strip ANSI/VT escape sequences and normalize line endings. */
+function stripAnsi(s) {
+    return s
+        .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '')
+        .replace(/\x1b[()][0-9A-Za-z]/g, '')
+        .replace(/\x1b[^[\]()]/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n');
+}
+/** Return the currently active terminal, or show an error and return undefined. */
+function getActiveTerminal() {
+    const t = vscode.window.activeTerminal;
+    if (t) {
+        return t;
+    }
+    vscode.window.showErrorMessage('lc4ri terminal mode: no terminal is open. ' +
+        'Please open a terminal (Ctrl+` / Cmd+`) and try again.');
+    return undefined;
+}
+/** Wait up to `timeoutMs` for the terminal's shell integration to become active. */
+function waitForShellIntegration(terminal, timeoutMs) {
+    if (terminal.shellIntegration) {
+        return Promise.resolve(terminal.shellIntegration);
+    }
+    return new Promise(resolve => {
+        const timer = setTimeout(() => { sub.dispose(); resolve(undefined); }, timeoutMs);
+        const sub = vscode.window.onDidChangeTerminalShellIntegration(e => {
+            if (e.terminal === terminal) {
+                clearTimeout(timer);
+                sub.dispose();
+                resolve(e.shellIntegration);
+            }
+        });
+    });
+}
+/**
+ * Fallback execution using workspace-folder-relative temp files.
+ *
+ * Temp files are placed inside the workspace directory so that vscode.workspace.fs
+ * can always read them via vscode.Uri.joinPath(folder.uri, ...) — this URI is correct
+ * regardless of whether the extension runs in the local or remote extension host.
+ * Using /tmp or other absolute paths fails because vscode.workspace.fs cannot reliably
+ * reach arbitrary paths outside the workspace from a local extension host.
+ *
+ * The command is wrapped so that:
+ *   - stdout/stderr are redirected to a temp file (hidden during execution)
+ *   - exit code is written to a separate file
+ *   - `cat` shows the output in the terminal after the command completes
+ *
+ * A polling loop watches for the rc file; once it appears, both files are read and
+ * the promise resolves.
+ */
+async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
+    var _a;
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    // Resolve temp file URIs and shell paths from the workspace folder.
+    // vscode.Uri.joinPath preserves the scheme/authority so both local and remote
+    // workspaces resolve correctly.
+    const folder = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0];
+    let outUri;
+    let rcUri;
+    let outShellPath;
+    let rcShellPath;
+    if (folder) {
+        const tmpDir = vscode.Uri.joinPath(folder.uri, '.lc4ri_tmp');
+        try {
+            await vscode.workspace.fs.createDirectory(tmpDir);
+        }
+        catch (_) { }
+        outUri = vscode.Uri.joinPath(tmpDir, `${id}.out`);
+        rcUri = vscode.Uri.joinPath(tmpDir, `${id}.rc`);
+        // folder.uri.path is the path component on the remote machine (no scheme/authority)
+        outShellPath = `${folder.uri.path}/.lc4ri_tmp/${id}.out`;
+        rcShellPath = `${folder.uri.path}/.lc4ri_tmp/${id}.rc`;
+    }
+    else {
+        // No workspace folder — pure local fallback
+        outUri = vscode.Uri.file(`/tmp/.lc4ri_${id}.out`);
+        rcUri = vscode.Uri.file(`/tmp/.lc4ri_${id}.rc`);
+        outShellPath = `/tmp/.lc4ri_${id}.out`;
+        rcShellPath = `/tmp/.lc4ri_${id}.rc`;
+    }
+    // Shell-safe single-quoted paths (handle spaces; single quotes are rare in workspace paths)
+    const outQ = `'${outShellPath.replace(/'/g, "'\\''")}'`;
+    const rcQ = `'${rcShellPath.replace(/'/g, "'\\''")}'`;
+    // Wrap: run command, save output, show in terminal via cat
+    const wrapped = `{ ${cmd}; } > ${outQ} 2>&1; echo $? > ${rcQ}; cat ${outQ}`;
+    terminal.sendText(wrapped, true);
+    outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] terminal fallback: temp files at ${outShellPath}`);
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = (result) => {
+            if (done) {
+                return;
+            }
+            done = true;
+            clearTimeout(timeoutHandle);
+            cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
+            vscode.workspace.fs.delete(outUri, { recursive: false }).then(() => { }, () => { });
+            vscode.workspace.fs.delete(rcUri, { recursive: false }).then(() => { }, () => { });
+            resolve(result);
+        };
+        const timeoutHandle = setTimeout(() => {
+            terminal.sendText('\x03', false);
+            finish({ stdout: '', stderr: '', code: -1, timedOut: true, cancelled: false });
+        }, Math.max(0, cfg.timeout));
+        const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => {
+            terminal.sendText('\x03', false);
+            finish({ stdout: '', stderr: '', code: 130, timedOut: false, cancelled: true });
+        });
+        const poll = async () => {
+            if (done) {
+                return;
+            }
+            try {
+                const rcBytes = await vscode.workspace.fs.readFile(rcUri);
+                const code = parseInt(new TextDecoder().decode(rcBytes).trim(), 10);
+                let stdout = '';
+                try {
+                    const outBytes = await vscode.workspace.fs.readFile(outUri);
+                    stdout = new TextDecoder().decode(outBytes);
+                    if (onData) {
+                        onData(stdout, false);
+                    }
+                }
+                catch (_) { }
+                finish({ stdout: stdout.trimEnd(), stderr: '', code: isNaN(code) ? 1 : code, timedOut: false, cancelled: false });
+            }
+            catch (_) {
+                if (!done) {
+                    setTimeout(poll, 200);
+                }
+            }
+        };
+        setTimeout(poll, 200);
+    });
+}
+/** Execute a command in the active VSCode terminal.
+ *  Uses Shell Integration API when available; falls back to temp-file capture otherwise. */
+async function execViaTerminal(cmd, cfg, token, onData) {
+    const terminal = getActiveTerminal();
+    if (!terminal) {
+        return { stdout: '', stderr: 'no terminal open', code: 1, timedOut: false, cancelled: false };
+    }
+    // Shell Integration API gives the cleanest output streaming.
+    // For established terminals it is already active (instant return).
+    // For freshly opened terminals wait up to 5 s for initialization.
+    const shellInt = await waitForShellIntegration(terminal, 5000);
+    if (shellInt) {
+        return execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData);
+    }
+    // Shell integration is unavailable (e.g. non-standard remote shell config).
+    // Fall back to temp-file capture which works via vscode.workspace.fs on any host.
+    outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine('[lc4ri] terminal mode: shell integration unavailable, using temp-file fallback');
+    return execViaTerminalFallback(cmd, cfg, terminal, token, onData);
+}
+function execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData) {
+    return new Promise((resolve) => {
+        const execution = shellInt.executeCommand(cmd);
+        let outputBuffer = '';
+        let resolved = false;
+        let timedOut = false;
+        let cancelled = false;
+        let capturedExitCode;
+        const finish = (to, ca) => {
+            if (resolved) {
+                return;
+            }
+            resolved = true;
+            clearTimeout(timeoutHandle);
+            cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
+            endSub.dispose();
+            resolve({
+                stdout: outputBuffer.replace(/\n+$/, ''),
+                stderr: '',
+                code: to ? -1 : (ca ? 130 : (capturedExitCode !== null && capturedExitCode !== void 0 ? capturedExitCode : 0)),
+                timedOut: to,
+                cancelled: ca
+            });
+        };
+        const timeoutHandle = setTimeout(() => {
+            timedOut = true;
+            terminal.sendText('\x03', false);
+            finish(true, false);
+        }, Math.max(0, cfg.timeout));
+        const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => {
+            cancelled = true;
+            terminal.sendText('\x03', false);
+            finish(false, true);
+        });
+        // Record exit code when reported, but resolve only after read() drains fully
+        // (remote connections may deliver data after the end event fires).
+        const endSub = vscode.window.onDidEndTerminalShellExecution(event => {
+            if (event.execution === execution) {
+                capturedExitCode = event.exitCode;
+            }
+        });
+        (async () => {
+            for await (const chunk of execution.read()) {
+                const clean = stripAnsi(chunk);
+                outputBuffer += clean;
+                if (onData && !resolved) {
+                    onData(clean, false);
+                }
+            }
+            finish(timedOut, cancelled);
+        })().catch(err => {
+            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine('[lc4ri] terminal read error: ' + String(err));
+            finish(false, false);
+        });
+    });
 }
 // =============================================================================
 // Current working directory / env tracking
@@ -1188,7 +1409,7 @@ async function handleNumberedAssignment(hit, ctx) {
     pushReport({ command: finalCmd, rendered: finalCmd, output: trimmed, code: res.code, ts: getDate(), ok: res.code === 0 && !res.timedOut && !res.cancelled, startMs, endMs, isParallel: false, parallelGroup: -1 });
 }
 async function runOneCommand(rawLine, depth, ctx) {
-    var _a, _b;
+    var _a, _b, _c;
     const stripRe = new RegExp(regTab(depth));
     const rawBody = rawLine.replace(stripRe, '');
     const { body: noParallelBody } = detectParallelFlag(rawBody);
@@ -1242,11 +1463,11 @@ async function runOneCommand(rawLine, depth, ctx) {
         ctx.execCount = depth + 1;
         return;
     }
-    if (ctx.cfg.toterminal) {
-        (_b = vscode.window.activeTerminal) === null || _b === void 0 ? void 0 : _b.sendText(finalCmd);
-        ctx.consoles += `(sent to terminal)\n`;
-    }
     if (isPureCdCommand(finalCmd)) {
+        if (ctx.cfg.toterminal) {
+            // Sync terminal CWD, then also run resolveCd to update extension state
+            (_b = vscode.window.activeTerminal) === null || _b === void 0 ? void 0 : _b.sendText(finalCmd, true);
+        }
         const cdRes = await resolveCd(finalCmd, ctx.cfg, ctx.token);
         if (cdRes.ok && cdRes.newCwd) {
             currentCwd = cdRes.newCwd;
@@ -1267,6 +1488,10 @@ async function runOneCommand(rawLine, depth, ctx) {
         return;
     }
     if (isPureExportCommand(finalCmd)) {
+        if (ctx.cfg.toterminal) {
+            // Sync terminal env, then also run resolveExport to update extension state
+            (_c = vscode.window.activeTerminal) === null || _c === void 0 ? void 0 : _c.sendText(finalCmd, true);
+        }
         const expRes = await resolveExport(finalCmd, ctx.cfg, ctx.token);
         if (expRes.ok) {
             Object.assign(currentEnv, expRes.vars);
@@ -1297,11 +1522,20 @@ async function runOneCommand(rawLine, depth, ctx) {
             await new Promise(r => setTimeout(r, retryInterval));
         }
         ctx.progress.report({ message: `${finalCmd}${retryCount > 0 ? ` (try ${attempts + 1})` : ''}` });
-        res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => {
-            const text = isStderr ? `[stderr] ${chunk}` : chunk;
-            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(text);
-            ctx.consoles += text;
-        }, currentEnv);
+        if (ctx.cfg.toterminal) {
+            res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token, (chunk, isStderr) => {
+                const text = isStderr ? `[stderr] ${chunk}` : chunk;
+                outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(text);
+                ctx.consoles += text;
+            });
+        }
+        else {
+            res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => {
+                const text = isStderr ? `[stderr] ${chunk}` : chunk;
+                outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(text);
+                ctx.consoles += text;
+            }, currentEnv);
+        }
         let suffix = "";
         if (res.timedOut) {
             suffix += `\n[timeout after ${ctx.cfg.timeout}ms]\n`;
@@ -1374,7 +1608,10 @@ async function runParallelGroup(rawLines, depth, ctx) {
         }
         ctx.progress.report({ message: `[parallel] ${finalCmd}` });
         const taskStart = Date.now();
-        const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`), currentEnv);
+        // In terminal mode, parallel tasks are serialized through the single terminal
+        const res = ctx.cfg.toterminal
+            ? await execViaTerminal(finalCmd, ctx.cfg, ctx.token, (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`))
+            : await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`), currentEnv);
         const taskEnd = Date.now();
         let suffix = "";
         if (res.timedOut) {
