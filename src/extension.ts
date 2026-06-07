@@ -491,8 +491,6 @@ async function confirmDangerous(cmd: string, pattern: string): Promise<boolean> 
     return pick === 'Run';
 }
 
-// (execAsync removed — all execution goes through execViaTerminal)
-
 function cancelAll(): void {
     vscode.window.activeTerminal?.sendText('\x03', false);
     outputChannel?.appendLine('[lc4ri] all running commands cancelled');
@@ -510,166 +508,8 @@ function stripAnsi(s: string): string {
         .replace(/\x1b[()][0-9A-Za-z]/g, '')
         .replace(/\x1b[^[\]()]/g, '')
         .replace(/\r\n/g, '\n')
-        .replace(/\n\r/g, '\n')  // CloudShell outputs LF+CR; treat as single newline
+        .replace(/\n\r/g, '\n')
         .replace(/\r/g, '\n');
-}
-
-/**
- * Find the index in `text` where content *after* the sentinel line starts.
- * Requires the sentinel to appear on its own line (preceded by \n or start-of-string,
- * followed by \n) so it is not confused with the shell echo of our wrapped command.
- * Returns -1 if not yet seen.
- */
-function findSentinelLine(text: string, sentinel: string): number {
-    let pos = 0;
-    while (true) {
-        const idx = text.indexOf(sentinel, pos);
-        if (idx < 0) { return -1; }
-        const prevOk = idx === 0 || text[idx - 1] === '\n';
-        const afterIdx = idx + sentinel.length;
-        const nextOk = afterIdx >= text.length || text[afterIdx] === '\n';
-        if (prevOk && nextOk) { return afterIdx + 1; } // position after the trailing \n
-        pos = idx + 1;
-    }
-}
-
-/**
- * Execute via sentinel-wrapped sendText + onDidWriteTerminalData.
- *
- * Works for ANY terminal type including custom Pseudoterminal extensions such as
- * vscode-aws-cloudshell, where Shell Integration is unavailable and the remote
- * filesystem cannot be shared.
- *
- * onDidWriteTerminalData fires for all data written to the terminal display regardless
- * of the terminal implementation. It was stabilised in VS Code 1.74 but is absent from
- * some @types/vscode snapshots, so it is accessed via `(vscode.window as any)`.
- *
- * Protocol:
- *   send → "echo LC4RI_S_<id>; <cmd>; echo LC4RI_E_<id>_$?"
- *   capture → everything between the standalone START and END sentinel lines
- *   exit code → parsed from the digits after LC4RI_E_<id>_
- */
-function execViaSentinel(
-    cmd: string,
-    cfg: LC4RIConfig,
-    terminal: vscode.Terminal,
-    token?: vscode.CancellationToken,
-    onData?: (chunk: string, isStderr: boolean) => void
-): Promise<ExecResult> {
-    return new Promise<ExecResult>((resolve) => {
-        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-        const startSentinel = 'LC4RI_S_' + id;
-        const endSentinel   = 'LC4RI_E_' + id;
-        // Resolve when terminal output is silent for this many ms (covers cases where
-        // sentinel detection fails due to PTY formatting differences in e.g. CloudShell).
-        const IDLE_MS = 1000;
-
-        let state: 'waiting' | 'capturing' | 'done' = 'waiting';
-        let accum  = '';  // raw buffer while waiting for start sentinel
-        let capBuf = '';  // buffer after start sentinel
-        let timedOut  = false;
-        let cancelled = false;
-        let idleHandle: ReturnType<typeof setTimeout> | undefined;
-
-        const clearIdle = () => {
-            if (idleHandle !== undefined) { clearTimeout(idleHandle); idleHandle = undefined; }
-        };
-
-        // Post-hoc sentinel extraction used when the idle path fires instead of the
-        // sentinel-detected path: attempt to strip command echo and find exit code.
-        const extractFromBuf = (buf: string): { stdout: string; code: number } => {
-            const startPos = findSentinelLine(buf, startSentinel);
-            const body = startPos >= 0 ? buf.slice(startPos) : buf;
-            // Normalize cross-chunk \n\r sequences that slipped through per-chunk stripAnsi.
-            // CloudShell PTY often splits line endings across chunks (chunk ends with \n,
-            // next chunk starts with \r), producing \n\n after individual conversion.
-            const normalize = (s: string) => s
-                .replace(/\n\r/g, '\n')   // in-buffer LF+CR → single newline
-                .replace(/\r/g, '\n')      // remaining bare CR → newline
-                .replace(/\n{2,}/g, '\n'); // collapse runs of newlines to one
-            const endIdx = body.indexOf(endSentinel);
-            if (endIdx >= 0) {
-                const tail = body.slice(endIdx + endSentinel.length);
-                const codeMatch = tail.match(/^_?(\d+)/);
-                return { stdout: normalize(body.slice(0, endIdx)), code: codeMatch ? parseInt(codeMatch[1], 10) : 0 };
-            }
-            return { stdout: normalize(body), code: 0 };
-        };
-
-        const finish = (to: boolean, ca: boolean) => {
-            if (state === 'done') { return; }
-            state = 'done';
-            clearIdle();
-            dataDisposable.dispose();
-            clearTimeout(timeoutHandle);
-            cancelSub?.dispose();
-            const { stdout, code } = extractFromBuf(capBuf || accum);
-            const clean = stdout.replace(/\n+$/, '');
-            // Deliver output once with sentinels and shell prompt already stripped.
-            // Intermediate onData calls during capture are intentionally omitted to
-            // prevent sentinel lines or shell prompts from leaking into the document.
-            if (onData && clean) { onData(clean + '\n', false); }
-            resolve({
-                stdout: clean,
-                stderr: '',
-                code: to ? -1 : (ca ? 130 : code),
-                timedOut: to,
-                cancelled: ca
-            });
-        };
-
-        // Reset the idle timer. Called on every data event in both states so that
-        // even if the start sentinel is never matched, output silence still resolves.
-        const resetIdle = () => {
-            clearIdle();
-            idleHandle = setTimeout(() => finish(false, false), IDLE_MS);
-        };
-
-        // onDidWriteTerminalData requires the terminalDataWriteEvent proposed API.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const dataDisposable: vscode.Disposable = (vscode.window as any).onDidWriteTerminalData(
-            (event: { terminal: vscode.Terminal; data: string }) => {
-                if (event.terminal !== terminal || state === 'done') { return; }
-                const clean = stripAnsi(event.data);
-
-                if (state === 'waiting') {
-                    accum += clean;
-                    resetIdle();
-                    const startPos = findSentinelLine(accum, startSentinel);
-                    if (startPos >= 0) {
-                        state = 'capturing';
-                        capBuf = accum.slice(startPos);
-                        accum = '';
-                        // end sentinel may have arrived in the same chunk
-                        const endIdx = capBuf.indexOf(endSentinel);
-                        if (endIdx >= 0) { finish(false, false); }
-                    }
-                    return;
-                }
-
-                // state === 'capturing' — accumulate silently; deliver clean at finish
-                capBuf += clean;
-                resetIdle();
-                const endIdx = capBuf.indexOf(endSentinel);
-                if (endIdx >= 0) { finish(false, false); }
-            }
-        );
-
-        const timeoutHandle = setTimeout(() => {
-            timedOut = true;
-            terminal.sendText('\x03', false);
-            finish(true, false);
-        }, Math.max(0, cfg.timeout));
-
-        const cancelSub = token?.onCancellationRequested(() => {
-            cancelled = true;
-            terminal.sendText('\x03', false);
-            finish(false, true);
-        });
-
-        // Send the sentinel-wrapped command. String concatenation avoids TS expanding $?.
-        terminal.sendText('echo ' + startSentinel + '; ' + cmd + '; echo ' + endSentinel + '_$?', true);
-    });
 }
 
 /** Return the currently active terminal, or show an error and return undefined. */
@@ -696,20 +536,6 @@ function waitForShellIntegration(terminal: vscode.Terminal, timeoutMs: number): 
 
 /**
  * Fallback execution using workspace-folder-relative temp files.
- *
- * Temp files are placed inside the workspace directory so that vscode.workspace.fs
- * can always read them via vscode.Uri.joinPath(folder.uri, ...) — this URI is correct
- * regardless of whether the extension runs in the local or remote extension host.
- * Using /tmp or other absolute paths fails because vscode.workspace.fs cannot reliably
- * reach arbitrary paths outside the workspace from a local extension host.
- *
- * The command is wrapped so that:
- *   - stdout/stderr are redirected to a temp file (hidden during execution)
- *   - exit code is written to a separate file
- *   - `cat` shows the output in the terminal after the command completes
- *
- * A polling loop watches for the rc file; once it appears, both files are read and
- * the promise resolves.
  */
 async function execViaTerminalFallback(
     cmd: string,
@@ -720,9 +546,6 @@ async function execViaTerminalFallback(
 ): Promise<ExecResult> {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
-    // Resolve temp file URIs and shell paths from the workspace folder.
-    // vscode.Uri.joinPath preserves the scheme/authority so both local and remote
-    // workspaces resolve correctly.
     const folder = vscode.workspace.workspaceFolders?.[0];
     let outUri: vscode.Uri;
     let rcUri: vscode.Uri;
@@ -734,22 +557,18 @@ async function execViaTerminalFallback(
         try { await vscode.workspace.fs.createDirectory(tmpDir); } catch (_) {}
         outUri = vscode.Uri.joinPath(tmpDir, `${id}.out`);
         rcUri  = vscode.Uri.joinPath(tmpDir, `${id}.rc`);
-        // folder.uri.path is the path component on the remote machine (no scheme/authority)
         outShellPath = `${folder.uri.path}/.lc4ri_tmp/${id}.out`;
         rcShellPath  = `${folder.uri.path}/.lc4ri_tmp/${id}.rc`;
     } else {
-        // No workspace folder — pure local fallback
         outUri = vscode.Uri.file(`/tmp/.lc4ri_${id}.out`);
         rcUri  = vscode.Uri.file(`/tmp/.lc4ri_${id}.rc`);
         outShellPath = `/tmp/.lc4ri_${id}.out`;
         rcShellPath  = `/tmp/.lc4ri_${id}.rc`;
     }
 
-    // Shell-safe single-quoted paths (handle spaces; single quotes are rare in workspace paths)
     const outQ = `'${outShellPath.replace(/'/g, "'\\''")}'`;
     const rcQ  = `'${rcShellPath.replace(/'/g, "'\\''")}'`;
 
-    // Wrap: run command, save output, show in terminal via cat
     const wrapped = `{ ${cmd}; } > ${outQ} 2>&1; echo $? > ${rcQ}; cat ${outQ}`;
     terminal.sendText(wrapped, true);
     outputChannel?.appendLine(`[lc4ri] terminal fallback: temp files at ${outShellPath}`);
@@ -760,17 +579,24 @@ async function execViaTerminalFallback(
         const finish = (result: ExecResult) => {
             if (done) { return; }
             done = true;
-            clearTimeout(timeoutHandle);
+            if (timeoutHandle !== undefined) { clearTimeout(timeoutHandle); }
             cancelSub?.dispose();
             vscode.workspace.fs.delete(outUri, { recursive: false }).then(() => {}, () => {});
             vscode.workspace.fs.delete(rcUri,  { recursive: false }).then(() => {}, () => {});
             resolve(result);
         };
 
-        const timeoutHandle = setTimeout(() => {
-            terminal.sendText('\x03', false);
-            finish({ stdout: '', stderr: '', code: -1, timedOut: true, cancelled: false });
-        }, Math.max(0, cfg.timeout));
+        let timeoutHandle: ReturnType<typeof setTimeout>;
+        const resetTimeout = () => {
+            if (timeoutHandle !== undefined) { clearTimeout(timeoutHandle); }
+            timeoutHandle = setTimeout(() => {
+                terminal.sendText('\x03', false);
+                finish({ stdout: '', stderr: '', code: -1, timedOut: true, cancelled: false });
+            }, Math.max(0, cfg.timeout));
+        };
+        resetTimeout();
+
+        let lastOutSize = 0;
 
         const cancelSub = token?.onCancellationRequested(() => {
             terminal.sendText('\x03', false);
@@ -790,21 +616,24 @@ async function execViaTerminalFallback(
                 } catch (_) {}
                 finish({ stdout: stdout.trimEnd(), stderr: '', code: isNaN(code) ? 1 : code, timedOut: false, cancelled: false });
             } catch (_) {
-                if (!done) { setTimeout(poll, 200); }
+                if (!done) {
+                    try {
+                        const stat = await vscode.workspace.fs.stat(outUri);
+                        if (stat.size > lastOutSize) {
+                            lastOutSize = stat.size;
+                            resetTimeout();
+                        }
+                    } catch (_) {}
+                    setTimeout(poll, 200);
+                }
             }
         };
         setTimeout(poll, 200);
     });
 }
 
-// Terminals for which we have confirmed that sentinel (onDidWriteTerminalData) works.
-// After the first successful execViaSentinel call, skip waitForShellIntegration so that
-// VS Code shell-integration injection cannot silently take over from command 2 onwards
-// (CloudShell uses a custom PTY where shell integration doesn't capture output correctly).
-const terminalUseSentinel = new WeakSet<vscode.Terminal>();
-
 /** Execute a command in the active VSCode terminal.
- *  Uses Shell Integration API when available; falls back to sentinel or temp-file capture. */
+ * Uses Shell Integration API when available; falls back to temp-file capture. */
 async function execViaTerminal(
     cmd: string,
     cfg: LC4RIConfig,
@@ -816,53 +645,16 @@ async function execViaTerminal(
         return { stdout: '', stderr: 'no terminal open', code: 1, timedOut: false, cancelled: false };
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const hasSentinelApi = typeof (vscode.window as any).onDidWriteTerminalData === 'function';
-
-    // If this terminal already succeeded with sentinel, skip shell-integration detection
-    // entirely — VS Code may inject shell integration between commands (e.g. via PROMPT_COMMAND)
-    // and execViaShellIntegration doesn't work correctly with CloudShell's custom PTY.
-    if (!terminalUseSentinel.has(terminal)) {
-        // Shell Integration API gives the cleanest output streaming.
-        // For established terminals it is already active (instant return).
-        // For freshly opened terminals wait up to 5 s for initialization.
-        const shellInt = await waitForShellIntegration(terminal, 5000);
-        if (shellInt) {
-            return execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData);
-        }
+    // Shell Integration API gives the cleanest output streaming.
+    // For established terminals it is already active (instant return).
+    // For freshly opened terminals wait up to 5 s for initialization.
+    const shellInt = await waitForShellIntegration(terminal, 5000);
+    if (shellInt) {
+        return execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData);
     }
 
-    // Shell integration is unavailable (or skipped for this terminal).
-    // onDidWriteTerminalData fires for ALL terminal types including Pseudoterminals,
-    // but it is a VS Code proposed API (terminalDataWriteEvent).  It exists at runtime
-    // in any recent VS Code, but calling it without --enable-proposed-api throws.
-    // We try it and fall back gracefully if the proposed-API gate fires.
-    // To enable for CloudShell, launch VS Code with:
-    //   code --enable-proposed-api yasutakatou.code-lc4ri
-    if (hasSentinelApi) {
-        outputChannel?.appendLine('[lc4ri] terminal mode: using sentinel/onDidWriteTerminalData');
-        try {
-            const result = await execViaSentinel(cmd, cfg, terminal, token, onData);
-            // Mark terminal so future commands skip the 5-second shell-integration wait.
-            terminalUseSentinel.add(terminal);
-            return result;
-        } catch (e: unknown) {
-            const msg = (e instanceof Error) ? e.message : String(e);
-            if (msg.includes('terminalDataWriteEvent') || msg.includes('enabledApiProposals')) {
-                outputChannel?.appendLine('[lc4ri] onDidWriteTerminalData blocked (proposed API) — falling back');
-                outputChannel?.appendLine('[lc4ri] Tip: launch VS Code with --enable-proposed-api yasutakatou.code-lc4ri for CloudShell support');
-                vscode.window.showWarningMessage(
-                    'lc4ri (CloudShell mode): output capture requires a proposed VS Code API. ' +
-                    'Launch VS Code with: code --enable-proposed-api yasutakatou.code-lc4ri'
-                );
-            } else {
-                throw e;
-            }
-        }
-    }
-
-    // Last resort: poll a temp file via vscode.workspace.fs.
-    // Works for local or Remote SSH (shared-filesystem) setups but not CloudShell.
+    // Shell integration is unavailable.
+    // Fall back to polling a temp file via vscode.workspace.fs.
     outputChannel?.appendLine('[lc4ri] terminal mode: shell integration unavailable, using temp-file fallback');
     return execViaTerminalFallback(cmd, cfg, terminal, token, onData);
 }
@@ -886,7 +678,7 @@ function execViaShellIntegration(
         const finish = (to: boolean, ca: boolean) => {
             if (resolved) { return; }
             resolved = true;
-            clearTimeout(timeoutHandle);
+            if (timeoutHandle !== undefined) { clearTimeout(timeoutHandle); }
             cancelSub?.dispose();
             endSub.dispose();
             resolve({
@@ -898,11 +690,16 @@ function execViaShellIntegration(
             });
         };
 
-        const timeoutHandle = setTimeout(() => {
-            timedOut = true;
-            terminal.sendText('\x03', false);
-            finish(true, false);
-        }, Math.max(0, cfg.timeout));
+        let timeoutHandle: ReturnType<typeof setTimeout>;
+        const resetTimeout = () => {
+            if (timeoutHandle !== undefined) { clearTimeout(timeoutHandle); }
+            timeoutHandle = setTimeout(() => {
+                timedOut = true;
+                terminal.sendText('\x03', false);
+                finish(true, false);
+            }, Math.max(0, cfg.timeout));
+        };
+        resetTimeout();
 
         const cancelSub = token?.onCancellationRequested(() => {
             cancelled = true;
@@ -911,7 +708,6 @@ function execViaShellIntegration(
         });
 
         // Record exit code when reported, but resolve only after read() drains fully
-        // (remote connections may deliver data after the end event fires).
         const endSub = vscode.window.onDidEndTerminalShellExecution(event => {
             if (event.execution === execution) { capturedExitCode = event.exitCode; }
         });
@@ -919,6 +715,11 @@ function execViaShellIntegration(
         (async () => {
             for await (const chunk of execution.read()) {
                 const clean = stripAnsi(chunk);
+                
+                if (clean) {
+                    resetTimeout();
+                }
+
                 outputBuffer += clean;
                 if (onData && !resolved) { onData(clean, false); }
             }

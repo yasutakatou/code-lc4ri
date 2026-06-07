@@ -2,7 +2,7 @@
     "name": "code-lc4ri",
     "displayName": "code-lc4ri",
     "description": "LC4RI for VS Code — Markdown driven reproducible operations",
-    "version": "1.5.0",
+    "version": "1.5.1",
     "publisher": "yasutakatou",
     "repository": "https://github.com/yasutakatou/code-lc4ri",
     "engines": {
@@ -20,7 +20,6 @@
         "code-lc4ri": "./bin/code-lc4ri.js"
     },
     "extensionKind": ["workspace", "ui"],
-    "enabledApiProposals": ["terminalDataWriteEvent"],
     "capabilities": {
         "untrustedWorkspaces": {
             "supported": "limited",
