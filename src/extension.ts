@@ -976,6 +976,7 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
             execCount: 0,
             execFlag: false,
             horizonFlag: -1,
+            blankStopFlag: -1,
             startLine: 0,
             endLine: 0,
             nowLine: position.line,
@@ -1034,6 +1035,7 @@ interface RunContext {
     execCount: number;
     execFlag: boolean;
     horizonFlag: number;
+    blankStopFlag: number;
     startLine: number;
     endLine: number;
     nowLine: number;
@@ -1057,6 +1059,7 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
 
         line = normalizeIndent(line);
 
+        // ① `---` 行が来た場合は必ず動作を停止する
         if (horizonCheck(line)) {
             ctx.horizonFlag = ctx.nowLine;
             persistentVars.num   = { ...ctx.vars.num };
@@ -1064,9 +1067,10 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
             break;
         }
 
-        // ⑤ Blank line stops execution after commands have run — write results before continuing
+        // ② ``` や - で指定されたコマンドが実行された後、改行のみの行が来た場合は必ず動作を停止する
+        //    停止位置は blankStopFlag に記録し、③ で出力位置の計算に使用する
         if (line.trim() === '' && ctx.execFlag) {
-            ctx.horizonFlag = ctx.nowLine;
+            ctx.blankStopFlag = ctx.nowLine;
             persistentVars.num   = { ...ctx.vars.num };
             persistentVars.named = { ...ctx.vars.named };
             break;
@@ -1505,7 +1509,7 @@ async function runInclude(includePath: string, ctx: RunContext): Promise<void> {
     if (!fs.existsSync(resolved)) { ctx.consoles += `\n[include: file not found: ${resolved}]\n`; return; }
     ctx.consoles += `\n[ include: ${resolved} ] ${getDate()}\n`;
     try {
-        const subCtx: RunContext = { ...ctx, consoles: '', execCount: 0, execFlag: false, horizonFlag: -1, startLine: 0, endLine: 0, nowLine: 0, assertionFailed: false };
+        const subCtx: RunContext = { ...ctx, consoles: '', execCount: 0, execFlag: false, horizonFlag: -1, blankStopFlag: -1, startLine: 0, endLine: 0, nowLine: 0, assertionFailed: false };
         await runLines(fs.readFileSync(resolved, 'utf8').split(/\r?\n/), subCtx);
         ctx.consoles += subCtx.consoles; ctx.vars = subCtx.vars; ctx.execFlag = ctx.execFlag || subCtx.execFlag;
     } catch (err) {
@@ -1624,7 +1628,12 @@ async function syncOutput(editor: vscode.TextEditor, doc: vscode.TextDocument, c
         let endL = ctx.endLine;
         
         if (startL === 0 && endL === 0) {
-            if (ctx.horizonFlag > -1) {
+            if (ctx.blankStopFlag > -1) {
+                // ③ ② で停止した場合、停止行(空行)の後に一行あけてから出力を追記する。
+                //    空行そのものをセパレータとして残し、その直後に出力ブロックを挿入する。
+                startL = ctx.blankStopFlag;
+                endL = ctx.blankStopFlag + 1;
+            } else if (ctx.horizonFlag > -1) {
                 startL = ctx.horizonFlag - 1;
                 endL = ctx.horizonFlag;
             } else {

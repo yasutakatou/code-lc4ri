@@ -1041,6 +1041,7 @@ async function runFromCursor(opts) {
             execCount: 0,
             execFlag: false,
             horizonFlag: -1,
+            blankStopFlag: -1,
             startLine: 0,
             endLine: 0,
             nowLine: position.line,
@@ -1101,8 +1102,17 @@ async function runLines(lines, ctx) {
             ctx.nowLine += cont.consumed - 1;
         }
         line = normalizeIndent(line);
+        // ① `---` 行が来た場合は必ず動作を停止する
         if (horizonCheck(line)) {
             ctx.horizonFlag = ctx.nowLine;
+            persistentVars.num = { ...ctx.vars.num };
+            persistentVars.named = { ...ctx.vars.named };
+            break;
+        }
+        // ② ``` や - で指定されたコマンドが実行された後、改行のみの行が来た場合は必ず動作を停止する
+        //    停止位置は blankStopFlag に記録し、③ で出力位置の計算に使用する
+        if (line.trim() === '' && ctx.execFlag) {
+            ctx.blankStopFlag = ctx.nowLine;
             persistentVars.num = { ...ctx.vars.num };
             persistentVars.named = { ...ctx.vars.named };
             break;
@@ -1434,7 +1444,10 @@ async function runOneCommand(rawLine, depth, ctx) {
     }
     if (/^!\s+/.test(cleanBody)) {
         const termCmd = cleanBody.replace(/^!\s+/, '').trim();
-        ctx.consoles += `\n[ ! ${termCmd} ] ${getDate()}\n`;
+        if (ctx.consoles.length > 0) {
+            ctx.consoles += '\n---\n';
+        }
+        ctx.consoles += `[ ! ${termCmd} ] ${getDate()}\n`;
         ctx.execFlag = true;
         if (ctx.dryRun) {
             ctx.consoles += `[dry-run: terminal] ${termCmd}\n`;
@@ -1450,7 +1463,10 @@ async function runOneCommand(rawLine, depth, ctx) {
     const finalCmd = applyTemplate(baseCmd, ctx.cfg, ctx.profile);
     const sec = checkSecurity(finalCmd, ctx.cfg);
     ctx.execFlag = true;
-    ctx.consoles += `\n[ ${finalCmd} ] ${getDate()}\n`;
+    if (ctx.consoles.length > 0) {
+        ctx.consoles += '\n---\n';
+    }
+    ctx.consoles += `[ ${finalCmd} ] ${getDate()}\n`;
     if (!sec.ok) {
         ctx.consoles += `(blocked by security: ${sec.reason})\n`;
         ctx.execCount = 0;
@@ -1586,7 +1602,7 @@ async function runInclude(includePath, ctx) {
     }
     ctx.consoles += `\n[ include: ${resolved} ] ${getDate()}\n`;
     try {
-        const subCtx = { ...ctx, consoles: '', execCount: 0, execFlag: false, horizonFlag: -1, startLine: 0, endLine: 0, nowLine: 0, assertionFailed: false };
+        const subCtx = { ...ctx, consoles: '', execCount: 0, execFlag: false, horizonFlag: -1, blankStopFlag: -1, startLine: 0, endLine: 0, nowLine: 0, assertionFailed: false };
         await runLines(fs.readFileSync(resolved, 'utf8').split(/\r?\n/), subCtx);
         ctx.consoles += subCtx.consoles;
         ctx.vars = subCtx.vars;
@@ -1606,7 +1622,7 @@ async function runParallelGroup(rawLines, depth, ctx) {
         const rawBody = rawLine.replace(depthRe, '');
         const { body: cleanBody, bindName } = extractBinding(detectParallelFlag(rawBody).body);
         const finalCmd = applyTemplate(applyChangeWord(substituteVars(cleanBody, ctx.vars), ctx.cfg.changeWord), ctx.cfg, ctx.profile);
-        const header = `\n[ ${finalCmd} ] ${getDate()}\n`;
+        const header = `[ ${finalCmd} ] ${getDate()}\n`;
         if (ctx.dryRun) {
             return { header, output: `[dry-run] ${finalCmd}\n`, ok: true, bindName, bindVal: '', startMs: groupStartMs, endMs: groupStartMs };
         }
@@ -1636,6 +1652,9 @@ async function runParallelGroup(rawLines, depth, ctx) {
     });
     const results = await Promise.all(tasks);
     for (const r of results) {
+        if (ctx.consoles.length > 0) {
+            ctx.consoles += '\n---\n';
+        }
         ctx.consoles += r.header + r.output;
         if (r.bindName) {
             ctx.vars.named[r.bindName] = r.bindVal;
@@ -1712,7 +1731,13 @@ async function syncOutput(editor, doc, ctx) {
         let startL = ctx.startLine;
         let endL = ctx.endLine;
         if (startL === 0 && endL === 0) {
-            if (ctx.horizonFlag > -1) {
+            if (ctx.blankStopFlag > -1) {
+                // ③ ② で停止した場合、停止行(空行)の後に一行あけてから出力を追記する。
+                //    空行そのものをセパレータとして残し、その直後に出力ブロックを挿入する。
+                startL = ctx.blankStopFlag;
+                endL = ctx.blankStopFlag + 1;
+            }
+            else if (ctx.horizonFlag > -1) {
                 startL = ctx.horizonFlag - 1;
                 endL = ctx.horizonFlag;
             }
