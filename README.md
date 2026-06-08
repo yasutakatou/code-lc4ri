@@ -1080,6 +1080,24 @@ The internal `getCurrentCwd()` helper no longer calls `fs.existsSync()` on the c
 
 ---
 
+# v1.5.7: Directory state fix on abnormal termination
+
+## 1. Directory state reset on abnormal termination
+
+In previous versions, if execution was interrupted abnormally (e.g., by killing VS Code, a terminal crash, or a forced window reload), the extension's internal `currentCwd` could be left pointing to a stale or nonexistent path. Subsequent runs would then resolve relative paths incorrectly or fail silently.
+
+v1.5.7 fixes this by resetting `currentCwd` to the runbook file's directory at the start of every execution, regardless of what the cached value was from a previous session.
+
+| Scenario | v1.5.6 behaviour | v1.5.7 behaviour |
+|---|---|---|
+| Normal restart after completing a runbook | cwd reset correctly | Same |
+| Reload Window / extension host crash mid-run | cwd retained stale path from previous run | cwd reset to runbook directory on next run |
+| Terminal killed while `cd` was in progress | Tracked cwd may not match actual terminal cwd | cwd reset to runbook directory on next run |
+
+No settings or document changes are required.
+
+---
+
 # LICENSE
 
 MIT License
