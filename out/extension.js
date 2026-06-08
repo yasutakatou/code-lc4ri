@@ -53,6 +53,8 @@ exports.detectParallelFlag = detectParallelFlag;
 exports.detectRetryFlag = detectRetryFlag;
 exports.substituteVars = substituteVars;
 exports.applyChangeWord = applyChangeWord;
+exports.isWindowsShell = isWindowsShell;
+exports.applyTemplate = applyTemplate;
 exports.applyProfile = applyProfile;
 exports.matchesAny = matchesAny;
 exports.checkSecurity = checkSecurity;
@@ -63,6 +65,7 @@ exports.setCurrentEnv = setCurrentEnv;
 exports.getPersistentVars = getPersistentVars;
 exports.setPersistentVars = setPersistentVars;
 exports.isPureExportCommand = isPureExportCommand;
+exports.isPurePsEnvCommand = isPurePsEnvCommand;
 exports.isPureCdCommand = isPureCdCommand;
 exports.buildVarInspectorHtml = buildVarInspectorHtml;
 // =============================================================================
@@ -105,6 +108,7 @@ let parallelGroupCounter = 0;
 // Defaults
 // -----------------------------------------------------------------------------
 exports.DEFAULT_DANGEROUS_PATTERNS = [
+    // Unix / Linux
     '\\brm\\s+-rf?\\s+/',
     '\\bdd\\s+if=',
     '\\bmkfs\\.',
@@ -113,11 +117,18 @@ exports.DEFAULT_DANGEROUS_PATTERNS = [
     ':\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:',
     'curl\\s+[^|]+\\|\\s*(?:sh|bash)',
     'wget\\s+[^|]+\\|\\s*(?:sh|bash)',
-    '>\\s*/dev/sd[a-z]'
+    '>\\s*/dev/sd[a-z]',
+    // Windows
+    '\\brd\\s+/s\\s+/q\\b',
+    '\\bformat\\s+[A-Za-z]:',
+    '\\bdel\\s+/[fFsS].*\\s+/[fFsS]',
+    'Remove-Item\\b.*-Recurse\\b.*-Force\\b',
+    'Remove-Item\\b.*-Force\\b.*-Recurse\\b',
 ];
 const DEFAULT_CONFIG = {
     timeout: 10000,
     profiles: {},
+    template: {},
     changeWord: {},
     outputFormat: 'codeblock',
     dangerousPatterns: exports.DEFAULT_DANGEROUS_PATTERNS,
@@ -125,6 +136,7 @@ const DEFAULT_CONFIG = {
     denyList: [],
     confirmDangerous: true,
     showCodeLens: true,
+    shell: null,
 };
 // =============================================================================
 // Activate / Deactivate
@@ -180,19 +192,21 @@ function deactivate() {
 // Configuration loading
 // =============================================================================
 function readConfig() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
     const ws = vscode.workspace.getConfiguration('lc4ri');
     const legacy = readLegacyConfig();
     const merged = {
         timeout: ws.get('timeout', (_a = legacy.timeout) !== null && _a !== void 0 ? _a : DEFAULT_CONFIG.timeout),
         profiles: ws.get('profiles', (_b = legacy.profiles) !== null && _b !== void 0 ? _b : DEFAULT_CONFIG.profiles),
-        changeWord: ws.get('changeWord', (_c = legacy.changeWord) !== null && _c !== void 0 ? _c : DEFAULT_CONFIG.changeWord),
-        outputFormat: ws.get('outputFormat', (_d = legacy.outputFormat) !== null && _d !== void 0 ? _d : DEFAULT_CONFIG.outputFormat),
-        dangerousPatterns: ws.get('dangerousPatterns', (_e = legacy.dangerousPatterns) !== null && _e !== void 0 ? _e : DEFAULT_CONFIG.dangerousPatterns),
-        allowList: ws.get('allowList', (_f = legacy.allowList) !== null && _f !== void 0 ? _f : DEFAULT_CONFIG.allowList),
-        denyList: ws.get('denyList', (_g = legacy.denyList) !== null && _g !== void 0 ? _g : DEFAULT_CONFIG.denyList),
-        confirmDangerous: ws.get('confirmDangerous', (_h = legacy.confirmDangerous) !== null && _h !== void 0 ? _h : DEFAULT_CONFIG.confirmDangerous),
-        showCodeLens: ws.get('showCodeLens', (_j = legacy.showCodeLens) !== null && _j !== void 0 ? _j : DEFAULT_CONFIG.showCodeLens),
+        template: ws.get('template', (_c = legacy.template) !== null && _c !== void 0 ? _c : DEFAULT_CONFIG.template),
+        changeWord: ws.get('changeWord', (_d = legacy.changeWord) !== null && _d !== void 0 ? _d : DEFAULT_CONFIG.changeWord),
+        outputFormat: ws.get('outputFormat', (_e = legacy.outputFormat) !== null && _e !== void 0 ? _e : DEFAULT_CONFIG.outputFormat),
+        dangerousPatterns: ws.get('dangerousPatterns', (_f = legacy.dangerousPatterns) !== null && _f !== void 0 ? _f : DEFAULT_CONFIG.dangerousPatterns),
+        allowList: ws.get('allowList', (_g = legacy.allowList) !== null && _g !== void 0 ? _g : DEFAULT_CONFIG.allowList),
+        denyList: ws.get('denyList', (_h = legacy.denyList) !== null && _h !== void 0 ? _h : DEFAULT_CONFIG.denyList),
+        confirmDangerous: ws.get('confirmDangerous', (_j = legacy.confirmDangerous) !== null && _j !== void 0 ? _j : DEFAULT_CONFIG.confirmDangerous),
+        showCodeLens: ws.get('showCodeLens', (_k = legacy.showCodeLens) !== null && _k !== void 0 ? _k : DEFAULT_CONFIG.showCodeLens),
+        shell: ws.get('shell', DEFAULT_CONFIG.shell),
     };
     return merged;
 }
@@ -461,11 +475,25 @@ function applyChangeWord(line, map) {
     }
     return line;
 }
-function applyProfile(cmd, cfg, profile) {
+/** Returns true when the active shell is PowerShell (explicit config or Windows default). */
+function isWindowsShell(cfg) {
+    return cfg.shell === 'powershell' || (cfg.shell === null && process.platform === 'win32');
+}
+/** Wrap cmd with a named profile, an OS-specific template, or return cmd as-is. */
+function applyTemplate(cmd, cfg, profile) {
+    var _a;
     if (profile && cfg.profiles[profile]) {
         return cfg.profiles[profile].replace('{COMMAND}', cmd);
     }
+    const tpl = (_a = cfg.template) === null || _a === void 0 ? void 0 : _a[process.platform];
+    if (tpl) {
+        return tpl.replace('{COMMAND}', cmd);
+    }
     return cmd;
+}
+/** @deprecated Use applyTemplate */
+function applyProfile(cmd, cfg, profile) {
+    return applyTemplate(cmd, cfg, profile);
 }
 function generateRandomAlpha(length) {
     const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -564,6 +592,25 @@ function waitForShellIntegration(terminal, timeoutMs) {
     });
 }
 /**
+ * Build the shell command that runs `cmd`, captures stdout+stderr to `outPath`,
+ * writes the exit code to `rcPath`, then prints the output file.
+ * Generates PowerShell syntax on Windows, POSIX sh syntax elsewhere.
+ */
+function buildFallbackWrapperCommand(cmd, outPath, rcPath, cfg) {
+    if (isWindowsShell(cfg)) {
+        // PowerShell: backtick-escape backticks/double-quotes inside the path
+        const esc = (p) => p.replace(/`/g, '``').replace(/"/g, '`"');
+        const out = esc(outPath);
+        const rc = esc(rcPath);
+        // Pipe merges stderr into stdout stream; $LASTEXITCODE is preserved across pipes for native executables
+        return `${cmd} 2>&1 | Out-File -LiteralPath "${out}" -Encoding utf8; $LASTEXITCODE | Set-Content -LiteralPath "${rc}" -NoNewline; Get-Content "${out}"`;
+    }
+    // POSIX sh
+    const outQ = `'${outPath.replace(/'/g, "'\\''")}'`;
+    const rcQ = `'${rcPath.replace(/'/g, "'\\''")}'`;
+    return `{ ${cmd}; } > ${outQ} 2>&1; echo $? > ${rcQ}; cat ${outQ}`;
+}
+/**
  * Fallback execution using workspace-folder-relative temp files.
  */
 async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
@@ -582,18 +629,19 @@ async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
         catch (_) { }
         outUri = vscode.Uri.joinPath(tmpDir, `${id}.out`);
         rcUri = vscode.Uri.joinPath(tmpDir, `${id}.rc`);
-        outShellPath = `${folder.uri.path}/.lc4ri_tmp/${id}.out`;
-        rcShellPath = `${folder.uri.path}/.lc4ri_tmp/${id}.rc`;
+        // Use fsPath (OS-native separators) so the shell can consume the path directly
+        outShellPath = path.join(folder.uri.fsPath, '.lc4ri_tmp', `${id}.out`);
+        rcShellPath = path.join(folder.uri.fsPath, '.lc4ri_tmp', `${id}.rc`);
     }
     else {
-        outUri = vscode.Uri.file(`/tmp/.lc4ri_${id}.out`);
-        rcUri = vscode.Uri.file(`/tmp/.lc4ri_${id}.rc`);
-        outShellPath = `/tmp/.lc4ri_${id}.out`;
-        rcShellPath = `/tmp/.lc4ri_${id}.rc`;
+        // Use os.tmpdir() — avoids the hardcoded /tmp that doesn't exist on Windows
+        const tmpBase = os.tmpdir();
+        outUri = vscode.Uri.file(path.join(tmpBase, `.lc4ri_${id}.out`));
+        rcUri = vscode.Uri.file(path.join(tmpBase, `.lc4ri_${id}.rc`));
+        outShellPath = path.join(tmpBase, `.lc4ri_${id}.out`);
+        rcShellPath = path.join(tmpBase, `.lc4ri_${id}.rc`);
     }
-    const outQ = `'${outShellPath.replace(/'/g, "'\\''")}'`;
-    const rcQ = `'${rcShellPath.replace(/'/g, "'\\''")}'`;
-    const wrapped = `{ ${cmd}; } > ${outQ} 2>&1; echo $? > ${rcQ}; cat ${outQ}`;
+    const wrapped = buildFallbackWrapperCommand(cmd, outShellPath, rcShellPath, cfg);
     terminal.sendText(wrapped, true);
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] terminal fallback: temp files at ${outShellPath}`);
     return new Promise((resolve) => {
@@ -796,18 +844,24 @@ function isPureExportCommand(cmd) {
     return true;
 }
 async function resolveExport(exportCmd, cfg, token) {
-    const probeCmd = `${exportCmd} && env`;
+    // PowerShell does not have `export` or `env`; use PS-compatible equivalents.
+    const win = isWindowsShell(cfg);
+    const sep = win ? '; ' : ' && ';
+    const envDump = win
+        ? `Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" }`
+        : 'env';
+    const probeCmd = `${exportCmd}${sep}${envDump}`;
     const res = await execViaTerminal(probeCmd, cfg, token);
     if (res.code !== 0 || res.timedOut || res.cancelled) {
         return { ok: false, vars: {}, output: (res.stderr || res.stdout || `export failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
     }
-    const envDump = {};
+    const parsedEnv = {};
     let currentKey = null, currentVal = [];
     for (const rawLine of res.stdout.split(/\r?\n/)) {
         const eqIdx = rawLine.indexOf('=');
         if (eqIdx > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawLine.slice(0, eqIdx))) {
             if (currentKey !== null) {
-                envDump[currentKey] = currentVal.join('\n');
+                parsedEnv[currentKey] = currentVal.join('\n');
             }
             currentKey = rawLine.slice(0, eqIdx);
             currentVal = [rawLine.slice(eqIdx + 1)];
@@ -817,24 +871,75 @@ async function resolveExport(exportCmd, cfg, token) {
         }
     }
     if (currentKey !== null) {
-        envDump[currentKey] = currentVal.join('\n');
+        parsedEnv[currentKey] = currentVal.join('\n');
     }
     const exportedNames = [];
     const body = exportCmd.replace(/^export\s+/, '');
-    for (const token of body.split(/\s+/)) {
-        const name = token.split('=')[0];
+    for (const tok of body.split(/\s+/)) {
+        const name = tok.split('=')[0];
         if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
             exportedNames.push(name);
         }
     }
     const captured = {};
     for (const name of exportedNames) {
-        if (name in envDump) {
-            captured[name] = envDump[name];
+        if (name in parsedEnv) {
+            captured[name] = parsedEnv[name];
         }
     }
     const summary = Object.entries(captured).map(([k, v]) => `${k}=${v}`).join(', ');
     return { ok: true, vars: captured, output: summary || '(no variables captured)' };
+}
+/** Detect PowerShell `$env:VARNAME = value` assignment (pure, no pipes/semicolons). */
+function isPurePsEnvCommand(cmd) {
+    const trimmed = cmd.trim();
+    if (!/^\$env:[A-Za-z_][A-Za-z0-9_]*\s*=(?!=)/.test(trimmed)) {
+        return false;
+    }
+    // Reject if there are unquoted statement separators after the first =
+    let inSingle = false, inDouble = false;
+    let pastEq = false;
+    for (let i = 0; i < trimmed.length; i++) {
+        const c = trimmed[i];
+        if (c === '`') {
+            i++;
+            continue;
+        } // PS escape
+        if (!inDouble && c === "'") {
+            inSingle = !inSingle;
+            continue;
+        }
+        if (!inSingle && c === '"') {
+            inDouble = !inDouble;
+            continue;
+        }
+        if (inSingle || inDouble) {
+            continue;
+        }
+        if (!pastEq && c === '=') {
+            pastEq = true;
+            continue;
+        }
+        if (pastEq && (c === ';' || c === '|' || c === '&')) {
+            return false;
+        }
+    }
+    return true;
+}
+/** Execute a PowerShell $env: assignment and capture the new value. */
+async function resolvePsEnv(psCmd, cfg, token) {
+    const m = psCmd.trim().match(/^\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!m) {
+        return { ok: false, varName: '', varVal: '', output: 'invalid $env: assignment' };
+    }
+    const varName = m[1];
+    const probeCmd = `${psCmd}; $env:${varName}`;
+    const res = await execViaTerminal(probeCmd, cfg, token);
+    if (res.code !== 0 || res.timedOut || res.cancelled) {
+        return { ok: false, varName, varVal: '', output: (res.stderr || res.stdout || `$env:${varName} assignment failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
+    }
+    const varVal = res.stdout.replace(/\r?\n+$/, '');
+    return { ok: true, varName, varVal, output: `${varName}=${varVal}` };
 }
 function isPureCdCommand(cmd) {
     const trimmed = cmd.trim();
@@ -867,7 +972,11 @@ function isPureCdCommand(cmd) {
 }
 async function resolveCd(cdCmd, cfg, token) {
     var _a;
-    const fullCmd = `${cdCmd} && pwd`;
+    // On PowerShell: `&&` is PS7+ only; use try/catch so a failed cd exits non-zero.
+    // `(Get-Location).Path` outputs just the path string without any object formatting.
+    const fullCmd = isWindowsShell(cfg)
+        ? `try { ${cdCmd} } catch { exit 1 }; (Get-Location).Path`
+        : `${cdCmd} && pwd`;
     const res = await execViaTerminal(fullCmd, cfg, token);
     if (res.code !== 0 || res.timedOut || res.cancelled) {
         return { ok: false, output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
@@ -1219,7 +1328,7 @@ async function handleNumberedAssignment(hit, ctx) {
     var _a;
     const { body, bindName } = extractBinding(hit.body);
     const cmd = applyChangeWord(substituteVars(body, ctx.vars), ctx.cfg.changeWord);
-    const finalCmd = applyProfile(cmd, ctx.cfg, ctx.profile);
+    const finalCmd = applyTemplate(cmd, ctx.cfg, ctx.profile);
     const sec = checkSecurity(finalCmd, ctx.cfg);
     if (!sec.ok) {
         ctx.vars.num[hit.idx] = `(blocked: ${(_a = sec.reason) !== null && _a !== void 0 ? _a : 'security'})`;
@@ -1264,6 +1373,23 @@ async function handleNumberedAssignment(hit, ctx) {
                 ctx.vars.named[bindName] = expRes.output;
             }
             ctx.vars.prev = expRes.output;
+            ctx.vars.status = 0;
+        }
+        else {
+            ctx.vars.status = 1;
+        }
+        refreshVarInspector(ctx.vars);
+        return;
+    }
+    if (isPurePsEnvCommand(finalCmd)) {
+        const psRes = await resolvePsEnv(finalCmd, ctx.cfg, ctx.token);
+        if (psRes.ok) {
+            currentEnv[psRes.varName] = psRes.varVal;
+            ctx.vars.num[hit.idx] = psRes.varVal;
+            if (bindName) {
+                ctx.vars.named[bindName] = psRes.varVal;
+            }
+            ctx.vars.prev = psRes.varVal;
             ctx.vars.status = 0;
         }
         else {
@@ -1321,7 +1447,7 @@ async function runOneCommand(rawLine, depth, ctx) {
         return;
     }
     const baseCmd = cleanBody;
-    const finalCmd = applyProfile(baseCmd, ctx.cfg, ctx.profile);
+    const finalCmd = applyTemplate(baseCmd, ctx.cfg, ctx.profile);
     const sec = checkSecurity(finalCmd, ctx.cfg);
     ctx.execFlag = true;
     ctx.consoles += `\n[ ${finalCmd} ] ${getDate()}\n`;
@@ -1376,6 +1502,26 @@ async function runOneCommand(rawLine, depth, ctx) {
         }
         else {
             ctx.consoles += `${expRes.output}\n[export failed]\n`;
+            ctx.vars.status = 1;
+            ctx.execCount = 0;
+        }
+        refreshVarInspector(ctx.vars);
+        return;
+    }
+    if (isPurePsEnvCommand(finalCmd)) {
+        const psRes = await resolvePsEnv(finalCmd, ctx.cfg, ctx.token);
+        if (psRes.ok) {
+            currentEnv[psRes.varName] = psRes.varVal;
+            ctx.consoles += `(env → ${psRes.output})\n`;
+            ctx.vars.prev = psRes.varVal;
+            ctx.vars.status = 0;
+            if (bindName) {
+                ctx.vars.named[bindName] = psRes.varVal;
+            }
+            ctx.execCount = depth + 1;
+        }
+        else {
+            ctx.consoles += `${psRes.output}\n[$env: assignment failed]\n`;
             ctx.vars.status = 1;
             ctx.execCount = 0;
         }
@@ -1459,7 +1605,7 @@ async function runParallelGroup(rawLines, depth, ctx) {
     const tasks = rawLines.map(async (rawLine) => {
         const rawBody = rawLine.replace(depthRe, '');
         const { body: cleanBody, bindName } = extractBinding(detectParallelFlag(rawBody).body);
-        const finalCmd = applyProfile(applyChangeWord(substituteVars(cleanBody, ctx.vars), ctx.cfg.changeWord), ctx.cfg, ctx.profile);
+        const finalCmd = applyTemplate(applyChangeWord(substituteVars(cleanBody, ctx.vars), ctx.cfg.changeWord), ctx.cfg, ctx.profile);
         const header = `\n[ ${finalCmd} ] ${getDate()}\n`;
         if (ctx.dryRun) {
             return { header, output: `[dry-run] ${finalCmd}\n`, ok: true, bindName, bindVal: '', startMs: groupStartMs, endMs: groupStartMs };

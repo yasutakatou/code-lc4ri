@@ -2,7 +2,7 @@
     "name": "code-lc4ri",
     "displayName": "code-lc4ri",
     "description": "LC4RI for VS Code — Markdown driven reproducible operations",
-    "version": "1.5.1",
+    "version": "1.5.2",
     "publisher": "yasutakatou",
     "repository": "https://github.com/yasutakatou/code-lc4ri",
     "engines": {
@@ -77,6 +77,17 @@
                     "type": "object",
                     "default": {},
                     "description": "Named execution profiles selectable from the status bar. Each entry wraps the command: { \"profile\": \"ssh user@host {COMMAND}\" }."
+                },
+                "lc4ri.template": {
+                    "type": "object",
+                    "default": {},
+                    "description": "OS-keyed command template applied when no profile is active. Keys are Node.js platform strings (win32, linux, darwin). Example: { \"win32\": \"wsl -e {COMMAND}\" }."
+                },
+                "lc4ri.shell": {
+                    "type": ["string", "null"],
+                    "default": null,
+                    "enum": [null, "powershell", "cmd", "bash"],
+                    "description": "Shell used in the active terminal. null = auto-detect (win32 → powershell, others → bash). Set explicitly when using a non-default shell (e.g. Git Bash on Windows)."
                 },
                 "lc4ri.changeWord": {
                     "type": "object",

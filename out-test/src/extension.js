@@ -53,7 +53,9 @@ exports.detectParallelFlag = detectParallelFlag;
 exports.detectRetryFlag = detectRetryFlag;
 exports.substituteVars = substituteVars;
 exports.applyChangeWord = applyChangeWord;
+exports.isWindowsShell = isWindowsShell;
 exports.applyTemplate = applyTemplate;
+exports.applyProfile = applyProfile;
 exports.matchesAny = matchesAny;
 exports.checkSecurity = checkSecurity;
 exports.getCurrentCwd = getCurrentCwd;
@@ -63,6 +65,7 @@ exports.setCurrentEnv = setCurrentEnv;
 exports.getPersistentVars = getPersistentVars;
 exports.setPersistentVars = setPersistentVars;
 exports.isPureExportCommand = isPureExportCommand;
+exports.isPurePsEnvCommand = isPurePsEnvCommand;
 exports.isPureCdCommand = isPureCdCommand;
 exports.buildVarInspectorHtml = buildVarInspectorHtml;
 // =============================================================================
@@ -73,7 +76,6 @@ exports.buildVarInspectorHtml = buildVarInspectorHtml;
 // =============================================================================
 const vscode = __importStar(require("vscode"));
 const child_process_1 = require("child_process");
-const Encoding = __importStar(require("encoding-japanese"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const os = __importStar(require("os"));
@@ -83,12 +85,10 @@ const os = __importStar(require("os"));
 let outputChannel;
 let statusBarItem;
 let activeProfile = '';
-const runningProcs = new Set();
 const reportEntries = [];
 let codeLensEmitter;
 let currentCwd = undefined;
 let currentEnv = {};
-let lc4riTerminal; // unused placeholder kept for deactivate cleanup
 let persistentVars = {
     num: {},
     named: {}
@@ -108,6 +108,7 @@ let parallelGroupCounter = 0;
 // Defaults
 // -----------------------------------------------------------------------------
 exports.DEFAULT_DANGEROUS_PATTERNS = [
+    // Unix / Linux
     '\\brm\\s+-rf?\\s+/',
     '\\bdd\\s+if=',
     '\\bmkfs\\.',
@@ -116,22 +117,26 @@ exports.DEFAULT_DANGEROUS_PATTERNS = [
     ':\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:',
     'curl\\s+[^|]+\\|\\s*(?:sh|bash)',
     'wget\\s+[^|]+\\|\\s*(?:sh|bash)',
-    '>\\s*/dev/sd[a-z]'
+    '>\\s*/dev/sd[a-z]',
+    // Windows
+    '\\brd\\s+/s\\s+/q\\b',
+    '\\bformat\\s+[A-Za-z]:',
+    '\\bdel\\s+/[fFsS].*\\s+/[fFsS]',
+    'Remove-Item\\b.*-Recurse\\b.*-Force\\b',
+    'Remove-Item\\b.*-Force\\b.*-Recurse\\b',
 ];
 const DEFAULT_CONFIG = {
     timeout: 10000,
-    template: {},
     profiles: {},
+    template: {},
     changeWord: {},
-    toutf8: true,
-    toterminal: false,
     outputFormat: 'codeblock',
     dangerousPatterns: exports.DEFAULT_DANGEROUS_PATTERNS,
     allowList: [],
     denyList: [],
     confirmDangerous: true,
     showCodeLens: true,
-    shell: null
+    shell: null,
 };
 // =============================================================================
 // Activate / Deactivate
@@ -179,7 +184,6 @@ function deactivate() {
     codeLensEmitter === null || codeLensEmitter === void 0 ? void 0 : codeLensEmitter.dispose();
     varInspectorPanel === null || varInspectorPanel === void 0 ? void 0 : varInspectorPanel.dispose();
     historyPanel === null || historyPanel === void 0 ? void 0 : historyPanel.dispose();
-    lc4riTerminal = undefined;
     currentEnv = {};
     persistentVars = { num: {}, named: {} };
     lastKnownVars = { num: {}, named: {}, prev: '', status: 0 };
@@ -188,23 +192,21 @@ function deactivate() {
 // Configuration loading
 // =============================================================================
 function readConfig() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
     const ws = vscode.workspace.getConfiguration('lc4ri');
     const legacy = readLegacyConfig();
     const merged = {
         timeout: ws.get('timeout', (_a = legacy.timeout) !== null && _a !== void 0 ? _a : DEFAULT_CONFIG.timeout),
-        template: ws.get('template', (_b = legacy.template) !== null && _b !== void 0 ? _b : DEFAULT_CONFIG.template),
-        profiles: ws.get('profiles', (_c = legacy.profiles) !== null && _c !== void 0 ? _c : DEFAULT_CONFIG.profiles),
+        profiles: ws.get('profiles', (_b = legacy.profiles) !== null && _b !== void 0 ? _b : DEFAULT_CONFIG.profiles),
+        template: ws.get('template', (_c = legacy.template) !== null && _c !== void 0 ? _c : DEFAULT_CONFIG.template),
         changeWord: ws.get('changeWord', (_d = legacy.changeWord) !== null && _d !== void 0 ? _d : DEFAULT_CONFIG.changeWord),
-        toutf8: ws.get('toUtf8', (_e = legacy.toutf8) !== null && _e !== void 0 ? _e : DEFAULT_CONFIG.toutf8),
-        toterminal: ws.get('toTerminal', (_f = legacy.toterminal) !== null && _f !== void 0 ? _f : DEFAULT_CONFIG.toterminal),
-        outputFormat: ws.get('outputFormat', (_g = legacy.outputFormat) !== null && _g !== void 0 ? _g : DEFAULT_CONFIG.outputFormat),
-        dangerousPatterns: ws.get('dangerousPatterns', (_h = legacy.dangerousPatterns) !== null && _h !== void 0 ? _h : DEFAULT_CONFIG.dangerousPatterns),
-        allowList: ws.get('allowList', (_j = legacy.allowList) !== null && _j !== void 0 ? _j : DEFAULT_CONFIG.allowList),
-        denyList: ws.get('denyList', (_k = legacy.denyList) !== null && _k !== void 0 ? _k : DEFAULT_CONFIG.denyList),
-        confirmDangerous: ws.get('confirmDangerous', (_l = legacy.confirmDangerous) !== null && _l !== void 0 ? _l : DEFAULT_CONFIG.confirmDangerous),
-        showCodeLens: ws.get('showCodeLens', (_m = legacy.showCodeLens) !== null && _m !== void 0 ? _m : DEFAULT_CONFIG.showCodeLens),
-        shell: ws.get('shell', (_o = legacy.shell) !== null && _o !== void 0 ? _o : DEFAULT_CONFIG.shell)
+        outputFormat: ws.get('outputFormat', (_e = legacy.outputFormat) !== null && _e !== void 0 ? _e : DEFAULT_CONFIG.outputFormat),
+        dangerousPatterns: ws.get('dangerousPatterns', (_f = legacy.dangerousPatterns) !== null && _f !== void 0 ? _f : DEFAULT_CONFIG.dangerousPatterns),
+        allowList: ws.get('allowList', (_g = legacy.allowList) !== null && _g !== void 0 ? _g : DEFAULT_CONFIG.allowList),
+        denyList: ws.get('denyList', (_h = legacy.denyList) !== null && _h !== void 0 ? _h : DEFAULT_CONFIG.denyList),
+        confirmDangerous: ws.get('confirmDangerous', (_j = legacy.confirmDangerous) !== null && _j !== void 0 ? _j : DEFAULT_CONFIG.confirmDangerous),
+        showCodeLens: ws.get('showCodeLens', (_k = legacy.showCodeLens) !== null && _k !== void 0 ? _k : DEFAULT_CONFIG.showCodeLens),
+        shell: ws.get('shell', DEFAULT_CONFIG.shell),
     };
     return merged;
 }
@@ -232,7 +234,7 @@ function ensureLegacyConfigFile() {
         fs.mkdirSync(dir, { recursive: true });
     }
     if (!fs.existsSync(file)) {
-        fs.writeFileSync(file, JSON.stringify({ timeout: DEFAULT_CONFIG.timeout, template: {}, profiles: {}, changeWord: {}, toutf8: true, toterminal: false }, null, 2), 'utf8');
+        fs.writeFileSync(file, JSON.stringify({ timeout: DEFAULT_CONFIG.timeout, profiles: {}, changeWord: {} }, null, 2), 'utf8');
     }
 }
 function legacyConfigPath() {
@@ -473,14 +475,25 @@ function applyChangeWord(line, map) {
     }
     return line;
 }
+/** Returns true when the active shell is PowerShell (explicit config or Windows default). */
+function isWindowsShell(cfg) {
+    return cfg.shell === 'powershell' || (cfg.shell === null && process.platform === 'win32');
+}
+/** Wrap cmd with a named profile, an OS-specific template, or return cmd as-is. */
 function applyTemplate(cmd, cfg, profile) {
+    var _a;
     if (profile && cfg.profiles[profile]) {
         return cfg.profiles[profile].replace('{COMMAND}', cmd);
     }
-    if (cfg.template && cfg.template[process.platform]) {
-        return cfg.template[process.platform].replace('{COMMAND}', cmd);
+    const tpl = (_a = cfg.template) === null || _a === void 0 ? void 0 : _a[process.platform];
+    if (tpl) {
+        return tpl.replace('{COMMAND}', cmd);
     }
     return cmd;
+}
+/** @deprecated Use applyTemplate */
+function applyProfile(cmd, cfg, profile) {
+    return applyTemplate(cmd, cfg, profile);
 }
 function generateRandomAlpha(length) {
     const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -533,87 +546,8 @@ async function confirmDangerous(cmd, pattern) {
     const pick = await vscode.window.showWarningMessage(`⚠ This command matches a dangerous pattern: /${pattern}/\n\n${cmd}\n\nExecute anyway?`, { modal: true }, 'Run', 'Cancel');
     return pick === 'Run';
 }
-// =============================================================================
-// Async exec (spawn-based)
-// =============================================================================
-function execAsync(cmd, cfg, token, cwd, onData, env) {
-    return new Promise((resolve) => {
-        var _a, _b, _c;
-        const shellCmd = (_a = cfg.shell) !== null && _a !== void 0 ? _a : (process.platform === 'win32' ? true : '/bin/sh');
-        let effectiveCwd = cwd;
-        if (effectiveCwd && !fs.existsSync(effectiveCwd)) {
-            effectiveCwd = undefined;
-        }
-        const effectiveEnv = env && Object.keys(env).length > 0 ? { ...process.env, ...env } : undefined;
-        const child = (0, child_process_1.spawn)(cmd, {
-            shell: shellCmd,
-            windowsHide: true, cwd: effectiveCwd, ...(effectiveEnv ? { env: effectiveEnv } : {})
-        });
-        runningProcs.add(child);
-        let stdoutBuf = Buffer.alloc(0), stderrBuf = Buffer.alloc(0);
-        let timedOut = false, cancelled = false;
-        const killAll = (signal = 'SIGTERM') => {
-            try {
-                child.kill(signal);
-            }
-            catch (_) { }
-            if (process.platform === 'win32' && child.pid) {
-                try {
-                    (0, child_process_1.execSync)(`taskkill /pid ${child.pid} /T /F`);
-                }
-                catch (_) { }
-            }
-        };
-        const timeoutTimer = setTimeout(() => { timedOut = true; killAll('SIGKILL'); }, Math.max(0, cfg.timeout));
-        const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => { cancelled = true; killAll('SIGTERM'); });
-        (_b = child.stdout) === null || _b === void 0 ? void 0 : _b.on('data', (b) => {
-            stdoutBuf = Buffer.concat([stdoutBuf, b]);
-            if (onData) {
-                onData(convToUTF(b, cfg), false);
-            }
-        });
-        (_c = child.stderr) === null || _c === void 0 ? void 0 : _c.on('data', (b) => {
-            stderrBuf = Buffer.concat([stderrBuf, b]);
-            if (onData) {
-                onData(convToUTF(b, cfg), true);
-            }
-        });
-        child.on('close', (code, signal) => {
-            clearTimeout(timeoutTimer);
-            cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
-            runningProcs.delete(child);
-            resolve({ stdout: convToUTF(stdoutBuf, cfg), stderr: convToUTF(stderrBuf, cfg), code: code !== null && code !== void 0 ? code : (signal ? 130 : -1), timedOut, cancelled });
-        });
-        child.on('error', (err) => {
-            var _a;
-            clearTimeout(timeoutTimer);
-            cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
-            runningProcs.delete(child);
-            resolve({ stdout: '', stderr: String((_a = err.message) !== null && _a !== void 0 ? _a : err), code: -1, timedOut, cancelled });
-        });
-    });
-}
-function convToUTF(buf, cfg) {
-    if (!cfg.toutf8) {
-        return buf.toString();
-    }
-    try {
-        return Encoding.convert(buf, { from: 'AUTO', to: 'UNICODE', type: 'string' });
-    }
-    catch (_) {
-        return buf.toString();
-    }
-}
 function cancelAll() {
     var _a;
-    for (const p of Array.from(runningProcs)) {
-        try {
-            p.kill('SIGTERM');
-        }
-        catch (_) { }
-    }
-    runningProcs.clear();
-    // Send Ctrl+C to the active terminal if in terminal mode
     (_a = vscode.window.activeTerminal) === null || _a === void 0 ? void 0 : _a.sendText('\x03', false);
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine('[lc4ri] all running commands cancelled');
 }
@@ -628,6 +562,7 @@ function stripAnsi(s) {
         .replace(/\x1b[()][0-9A-Za-z]/g, '')
         .replace(/\x1b[^[\]()]/g, '')
         .replace(/\r\n/g, '\n')
+        .replace(/\n\r/g, '\n')
         .replace(/\r/g, '\n');
 }
 /** Return the currently active terminal, or show an error and return undefined. */
@@ -657,28 +592,30 @@ function waitForShellIntegration(terminal, timeoutMs) {
     });
 }
 /**
+ * Build the shell command that runs `cmd`, captures stdout+stderr to `outPath`,
+ * writes the exit code to `rcPath`, then prints the output file.
+ * Generates PowerShell syntax on Windows, POSIX sh syntax elsewhere.
+ */
+function buildFallbackWrapperCommand(cmd, outPath, rcPath, cfg) {
+    if (isWindowsShell(cfg)) {
+        // PowerShell: backtick-escape backticks/double-quotes inside the path
+        const esc = (p) => p.replace(/`/g, '``').replace(/"/g, '`"');
+        const out = esc(outPath);
+        const rc = esc(rcPath);
+        // Pipe merges stderr into stdout stream; $LASTEXITCODE is preserved across pipes for native executables
+        return `${cmd} 2>&1 | Out-File -LiteralPath "${out}" -Encoding utf8; $LASTEXITCODE | Set-Content -LiteralPath "${rc}" -NoNewline; Get-Content "${out}"`;
+    }
+    // POSIX sh
+    const outQ = `'${outPath.replace(/'/g, "'\\''")}'`;
+    const rcQ = `'${rcPath.replace(/'/g, "'\\''")}'`;
+    return `{ ${cmd}; } > ${outQ} 2>&1; echo $? > ${rcQ}; cat ${outQ}`;
+}
+/**
  * Fallback execution using workspace-folder-relative temp files.
- *
- * Temp files are placed inside the workspace directory so that vscode.workspace.fs
- * can always read them via vscode.Uri.joinPath(folder.uri, ...) — this URI is correct
- * regardless of whether the extension runs in the local or remote extension host.
- * Using /tmp or other absolute paths fails because vscode.workspace.fs cannot reliably
- * reach arbitrary paths outside the workspace from a local extension host.
- *
- * The command is wrapped so that:
- *   - stdout/stderr are redirected to a temp file (hidden during execution)
- *   - exit code is written to a separate file
- *   - `cat` shows the output in the terminal after the command completes
- *
- * A polling loop watches for the rc file; once it appears, both files are read and
- * the promise resolves.
  */
 async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
     var _a;
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    // Resolve temp file URIs and shell paths from the workspace folder.
-    // vscode.Uri.joinPath preserves the scheme/authority so both local and remote
-    // workspaces resolve correctly.
     const folder = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0];
     let outUri;
     let rcUri;
@@ -692,22 +629,19 @@ async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
         catch (_) { }
         outUri = vscode.Uri.joinPath(tmpDir, `${id}.out`);
         rcUri = vscode.Uri.joinPath(tmpDir, `${id}.rc`);
-        // folder.uri.path is the path component on the remote machine (no scheme/authority)
-        outShellPath = `${folder.uri.path}/.lc4ri_tmp/${id}.out`;
-        rcShellPath = `${folder.uri.path}/.lc4ri_tmp/${id}.rc`;
+        // Use fsPath (OS-native separators) so the shell can consume the path directly
+        outShellPath = path.join(folder.uri.fsPath, '.lc4ri_tmp', `${id}.out`);
+        rcShellPath = path.join(folder.uri.fsPath, '.lc4ri_tmp', `${id}.rc`);
     }
     else {
-        // No workspace folder — pure local fallback
-        outUri = vscode.Uri.file(`/tmp/.lc4ri_${id}.out`);
-        rcUri = vscode.Uri.file(`/tmp/.lc4ri_${id}.rc`);
-        outShellPath = `/tmp/.lc4ri_${id}.out`;
-        rcShellPath = `/tmp/.lc4ri_${id}.rc`;
+        // Use os.tmpdir() — avoids the hardcoded /tmp that doesn't exist on Windows
+        const tmpBase = os.tmpdir();
+        outUri = vscode.Uri.file(path.join(tmpBase, `.lc4ri_${id}.out`));
+        rcUri = vscode.Uri.file(path.join(tmpBase, `.lc4ri_${id}.rc`));
+        outShellPath = path.join(tmpBase, `.lc4ri_${id}.out`);
+        rcShellPath = path.join(tmpBase, `.lc4ri_${id}.rc`);
     }
-    // Shell-safe single-quoted paths (handle spaces; single quotes are rare in workspace paths)
-    const outQ = `'${outShellPath.replace(/'/g, "'\\''")}'`;
-    const rcQ = `'${rcShellPath.replace(/'/g, "'\\''")}'`;
-    // Wrap: run command, save output, show in terminal via cat
-    const wrapped = `{ ${cmd}; } > ${outQ} 2>&1; echo $? > ${rcQ}; cat ${outQ}`;
+    const wrapped = buildFallbackWrapperCommand(cmd, outShellPath, rcShellPath, cfg);
     terminal.sendText(wrapped, true);
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine(`[lc4ri] terminal fallback: temp files at ${outShellPath}`);
     return new Promise((resolve) => {
@@ -717,16 +651,26 @@ async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
                 return;
             }
             done = true;
-            clearTimeout(timeoutHandle);
+            if (timeoutHandle !== undefined) {
+                clearTimeout(timeoutHandle);
+            }
             cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
             vscode.workspace.fs.delete(outUri, { recursive: false }).then(() => { }, () => { });
             vscode.workspace.fs.delete(rcUri, { recursive: false }).then(() => { }, () => { });
             resolve(result);
         };
-        const timeoutHandle = setTimeout(() => {
-            terminal.sendText('\x03', false);
-            finish({ stdout: '', stderr: '', code: -1, timedOut: true, cancelled: false });
-        }, Math.max(0, cfg.timeout));
+        let timeoutHandle;
+        const resetTimeout = () => {
+            if (timeoutHandle !== undefined) {
+                clearTimeout(timeoutHandle);
+            }
+            timeoutHandle = setTimeout(() => {
+                terminal.sendText('\x03', false);
+                finish({ stdout: '', stderr: '', code: -1, timedOut: true, cancelled: false });
+            }, Math.max(0, cfg.timeout));
+        };
+        resetTimeout();
+        let lastOutSize = 0;
         const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => {
             terminal.sendText('\x03', false);
             finish({ stdout: '', stderr: '', code: 130, timedOut: false, cancelled: true });
@@ -751,6 +695,14 @@ async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
             }
             catch (_) {
                 if (!done) {
+                    try {
+                        const stat = await vscode.workspace.fs.stat(outUri);
+                        if (stat.size > lastOutSize) {
+                            lastOutSize = stat.size;
+                            resetTimeout();
+                        }
+                    }
+                    catch (_) { }
                     setTimeout(poll, 200);
                 }
             }
@@ -759,7 +711,7 @@ async function execViaTerminalFallback(cmd, cfg, terminal, token, onData) {
     });
 }
 /** Execute a command in the active VSCode terminal.
- *  Uses Shell Integration API when available; falls back to temp-file capture otherwise. */
+ * Uses Shell Integration API when available; falls back to temp-file capture. */
 async function execViaTerminal(cmd, cfg, token, onData) {
     const terminal = getActiveTerminal();
     if (!terminal) {
@@ -772,8 +724,8 @@ async function execViaTerminal(cmd, cfg, token, onData) {
     if (shellInt) {
         return execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData);
     }
-    // Shell integration is unavailable (e.g. non-standard remote shell config).
-    // Fall back to temp-file capture which works via vscode.workspace.fs on any host.
+    // Shell integration is unavailable.
+    // Fall back to polling a temp file via vscode.workspace.fs.
     outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.appendLine('[lc4ri] terminal mode: shell integration unavailable, using temp-file fallback');
     return execViaTerminalFallback(cmd, cfg, terminal, token, onData);
 }
@@ -790,7 +742,9 @@ function execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData) {
                 return;
             }
             resolved = true;
-            clearTimeout(timeoutHandle);
+            if (timeoutHandle !== undefined) {
+                clearTimeout(timeoutHandle);
+            }
             cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
             endSub.dispose();
             resolve({
@@ -801,18 +755,24 @@ function execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData) {
                 cancelled: ca
             });
         };
-        const timeoutHandle = setTimeout(() => {
-            timedOut = true;
-            terminal.sendText('\x03', false);
-            finish(true, false);
-        }, Math.max(0, cfg.timeout));
+        let timeoutHandle;
+        const resetTimeout = () => {
+            if (timeoutHandle !== undefined) {
+                clearTimeout(timeoutHandle);
+            }
+            timeoutHandle = setTimeout(() => {
+                timedOut = true;
+                terminal.sendText('\x03', false);
+                finish(true, false);
+            }, Math.max(0, cfg.timeout));
+        };
+        resetTimeout();
         const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => {
             cancelled = true;
             terminal.sendText('\x03', false);
             finish(false, true);
         });
         // Record exit code when reported, but resolve only after read() drains fully
-        // (remote connections may deliver data after the end event fires).
         const endSub = vscode.window.onDidEndTerminalShellExecution(event => {
             if (event.execution === execution) {
                 capturedExitCode = event.exitCode;
@@ -821,6 +781,9 @@ function execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData) {
         (async () => {
             for await (const chunk of execution.read()) {
                 const clean = stripAnsi(chunk);
+                if (clean) {
+                    resetTimeout();
+                }
                 outputBuffer += clean;
                 if (onData && !resolved) {
                     onData(clean, false);
@@ -881,52 +844,24 @@ function isPureExportCommand(cmd) {
     return true;
 }
 async function resolveExport(exportCmd, cfg, token) {
-    const baseCwd = getCurrentCwd();
-    const baseEnv = Object.keys(currentEnv).length > 0 ? { ...process.env, ...currentEnv } : undefined;
-    const probeCmd = `${exportCmd} && env`;
-    const res = await new Promise((resolve) => {
-        var _a, _b, _c;
-        const shellCmd = (_a = cfg.shell) !== null && _a !== void 0 ? _a : (process.platform === 'win32' ? true : '/bin/sh');
-        let effectiveCwd = baseCwd;
-        if (effectiveCwd && !fs.existsSync(effectiveCwd)) {
-            effectiveCwd = undefined;
-        }
-        const child = (0, child_process_1.spawn)(probeCmd, { shell: shellCmd, windowsHide: true, cwd: effectiveCwd, ...(baseEnv ? { env: baseEnv } : {}) });
-        runningProcs.add(child);
-        let stdoutBuf = Buffer.alloc(0), stderrBuf = Buffer.alloc(0);
-        let timedOut = false, cancelled = false;
-        const killAll = (signal = 'SIGTERM') => { try {
-            child.kill(signal);
-        }
-        catch (_) { } };
-        const timeoutTimer = setTimeout(() => { timedOut = true; killAll('SIGKILL'); }, Math.max(0, cfg.timeout));
-        const cancelSub = token === null || token === void 0 ? void 0 : token.onCancellationRequested(() => { cancelled = true; killAll('SIGTERM'); });
-        (_b = child.stdout) === null || _b === void 0 ? void 0 : _b.on('data', (b) => { stdoutBuf = Buffer.concat([stdoutBuf, b]); });
-        (_c = child.stderr) === null || _c === void 0 ? void 0 : _c.on('data', (b) => { stderrBuf = Buffer.concat([stderrBuf, b]); });
-        child.on('close', (code, signal) => {
-            clearTimeout(timeoutTimer);
-            cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
-            runningProcs.delete(child);
-            resolve({ stdout: convToUTF(stdoutBuf, cfg), stderr: convToUTF(stderrBuf, cfg), code: code !== null && code !== void 0 ? code : (signal ? 130 : -1), timedOut, cancelled });
-        });
-        child.on('error', (err) => {
-            var _a;
-            clearTimeout(timeoutTimer);
-            cancelSub === null || cancelSub === void 0 ? void 0 : cancelSub.dispose();
-            runningProcs.delete(child);
-            resolve({ stdout: '', stderr: String((_a = err.message) !== null && _a !== void 0 ? _a : err), code: -1, timedOut, cancelled });
-        });
-    });
+    // PowerShell does not have `export` or `env`; use PS-compatible equivalents.
+    const win = isWindowsShell(cfg);
+    const sep = win ? '; ' : ' && ';
+    const envDump = win
+        ? `Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" }`
+        : 'env';
+    const probeCmd = `${exportCmd}${sep}${envDump}`;
+    const res = await execViaTerminal(probeCmd, cfg, token);
     if (res.code !== 0 || res.timedOut || res.cancelled) {
         return { ok: false, vars: {}, output: (res.stderr || res.stdout || `export failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
     }
-    const envDump = {};
+    const parsedEnv = {};
     let currentKey = null, currentVal = [];
     for (const rawLine of res.stdout.split(/\r?\n/)) {
         const eqIdx = rawLine.indexOf('=');
         if (eqIdx > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawLine.slice(0, eqIdx))) {
             if (currentKey !== null) {
-                envDump[currentKey] = currentVal.join('\n');
+                parsedEnv[currentKey] = currentVal.join('\n');
             }
             currentKey = rawLine.slice(0, eqIdx);
             currentVal = [rawLine.slice(eqIdx + 1)];
@@ -936,24 +871,75 @@ async function resolveExport(exportCmd, cfg, token) {
         }
     }
     if (currentKey !== null) {
-        envDump[currentKey] = currentVal.join('\n');
+        parsedEnv[currentKey] = currentVal.join('\n');
     }
     const exportedNames = [];
     const body = exportCmd.replace(/^export\s+/, '');
-    for (const token of body.split(/\s+/)) {
-        const name = token.split('=')[0];
+    for (const tok of body.split(/\s+/)) {
+        const name = tok.split('=')[0];
         if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
             exportedNames.push(name);
         }
     }
     const captured = {};
     for (const name of exportedNames) {
-        if (name in envDump) {
-            captured[name] = envDump[name];
+        if (name in parsedEnv) {
+            captured[name] = parsedEnv[name];
         }
     }
     const summary = Object.entries(captured).map(([k, v]) => `${k}=${v}`).join(', ');
     return { ok: true, vars: captured, output: summary || '(no variables captured)' };
+}
+/** Detect PowerShell `$env:VARNAME = value` assignment (pure, no pipes/semicolons). */
+function isPurePsEnvCommand(cmd) {
+    const trimmed = cmd.trim();
+    if (!/^\$env:[A-Za-z_][A-Za-z0-9_]*\s*=(?!=)/.test(trimmed)) {
+        return false;
+    }
+    // Reject if there are unquoted statement separators after the first =
+    let inSingle = false, inDouble = false;
+    let pastEq = false;
+    for (let i = 0; i < trimmed.length; i++) {
+        const c = trimmed[i];
+        if (c === '`') {
+            i++;
+            continue;
+        } // PS escape
+        if (!inDouble && c === "'") {
+            inSingle = !inSingle;
+            continue;
+        }
+        if (!inSingle && c === '"') {
+            inDouble = !inDouble;
+            continue;
+        }
+        if (inSingle || inDouble) {
+            continue;
+        }
+        if (!pastEq && c === '=') {
+            pastEq = true;
+            continue;
+        }
+        if (pastEq && (c === ';' || c === '|' || c === '&')) {
+            return false;
+        }
+    }
+    return true;
+}
+/** Execute a PowerShell $env: assignment and capture the new value. */
+async function resolvePsEnv(psCmd, cfg, token) {
+    const m = psCmd.trim().match(/^\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!m) {
+        return { ok: false, varName: '', varVal: '', output: 'invalid $env: assignment' };
+    }
+    const varName = m[1];
+    const probeCmd = `${psCmd}; $env:${varName}`;
+    const res = await execViaTerminal(probeCmd, cfg, token);
+    if (res.code !== 0 || res.timedOut || res.cancelled) {
+        return { ok: false, varName, varVal: '', output: (res.stderr || res.stdout || `$env:${varName} assignment failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
+    }
+    const varVal = res.stdout.replace(/\r?\n+$/, '');
+    return { ok: true, varName, varVal, output: `${varName}=${varVal}` };
 }
 function isPureCdCommand(cmd) {
     const trimmed = cmd.trim();
@@ -986,10 +972,12 @@ function isPureCdCommand(cmd) {
 }
 async function resolveCd(cdCmd, cfg, token) {
     var _a;
-    const baseCwd = getCurrentCwd();
-    const printPwd = process.platform === 'win32' ? 'cd' : 'pwd';
-    const fullCmd = `${cdCmd} && ${printPwd}`;
-    const res = await execAsync(fullCmd, cfg, token, baseCwd, undefined, currentEnv);
+    // On PowerShell: `&&` is PS7+ only; use try/catch so a failed cd exits non-zero.
+    // `(Get-Location).Path` outputs just the path string without any object formatting.
+    const fullCmd = isWindowsShell(cfg)
+        ? `try { ${cdCmd} } catch { exit 1 }; (Get-Location).Path`
+        : `${cdCmd} && pwd`;
+    const res = await execViaTerminal(fullCmd, cfg, token);
     if (res.code !== 0 || res.timedOut || res.cancelled) {
         return { ok: false, output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
     }
@@ -1393,9 +1381,26 @@ async function handleNumberedAssignment(hit, ctx) {
         refreshVarInspector(ctx.vars);
         return;
     }
+    if (isPurePsEnvCommand(finalCmd)) {
+        const psRes = await resolvePsEnv(finalCmd, ctx.cfg, ctx.token);
+        if (psRes.ok) {
+            currentEnv[psRes.varName] = psRes.varVal;
+            ctx.vars.num[hit.idx] = psRes.varVal;
+            if (bindName) {
+                ctx.vars.named[bindName] = psRes.varVal;
+            }
+            ctx.vars.prev = psRes.varVal;
+            ctx.vars.status = 0;
+        }
+        else {
+            ctx.vars.status = 1;
+        }
+        refreshVarInspector(ctx.vars);
+        return;
+    }
     ctx.progress.report({ message: `setting {${hit.idx}}: ${finalCmd}` });
     const startMs = Date.now();
-    const res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), undefined, currentEnv);
+    const res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token);
     const endMs = Date.now();
     const trimmed = (res.stdout || res.stderr).replace(/\r?\n+$/, '');
     ctx.vars.num[hit.idx] = trimmed;
@@ -1409,7 +1414,7 @@ async function handleNumberedAssignment(hit, ctx) {
     pushReport({ command: finalCmd, rendered: finalCmd, output: trimmed, code: res.code, ts: getDate(), ok: res.code === 0 && !res.timedOut && !res.cancelled, startMs, endMs, isParallel: false, parallelGroup: -1 });
 }
 async function runOneCommand(rawLine, depth, ctx) {
-    var _a, _b, _c;
+    var _a;
     const stripRe = new RegExp(regTab(depth));
     const rawBody = rawLine.replace(stripRe, '');
     const { body: noParallelBody } = detectParallelFlag(rawBody);
@@ -1464,10 +1469,6 @@ async function runOneCommand(rawLine, depth, ctx) {
         return;
     }
     if (isPureCdCommand(finalCmd)) {
-        if (ctx.cfg.toterminal) {
-            // Sync terminal CWD, then also run resolveCd to update extension state
-            (_b = vscode.window.activeTerminal) === null || _b === void 0 ? void 0 : _b.sendText(finalCmd, true);
-        }
         const cdRes = await resolveCd(finalCmd, ctx.cfg, ctx.token);
         if (cdRes.ok && cdRes.newCwd) {
             currentCwd = cdRes.newCwd;
@@ -1488,10 +1489,6 @@ async function runOneCommand(rawLine, depth, ctx) {
         return;
     }
     if (isPureExportCommand(finalCmd)) {
-        if (ctx.cfg.toterminal) {
-            // Sync terminal env, then also run resolveExport to update extension state
-            (_c = vscode.window.activeTerminal) === null || _c === void 0 ? void 0 : _c.sendText(finalCmd, true);
-        }
         const expRes = await resolveExport(finalCmd, ctx.cfg, ctx.token);
         if (expRes.ok) {
             Object.assign(currentEnv, expRes.vars);
@@ -1511,6 +1508,26 @@ async function runOneCommand(rawLine, depth, ctx) {
         refreshVarInspector(ctx.vars);
         return;
     }
+    if (isPurePsEnvCommand(finalCmd)) {
+        const psRes = await resolvePsEnv(finalCmd, ctx.cfg, ctx.token);
+        if (psRes.ok) {
+            currentEnv[psRes.varName] = psRes.varVal;
+            ctx.consoles += `(env → ${psRes.output})\n`;
+            ctx.vars.prev = psRes.varVal;
+            ctx.vars.status = 0;
+            if (bindName) {
+                ctx.vars.named[bindName] = psRes.varVal;
+            }
+            ctx.execCount = depth + 1;
+        }
+        else {
+            ctx.consoles += `${psRes.output}\n[$env: assignment failed]\n`;
+            ctx.vars.status = 1;
+            ctx.execCount = 0;
+        }
+        refreshVarInspector(ctx.vars);
+        return;
+    }
     let attempts = 0;
     let maxAttempts = retryCount > 0 ? retryCount + 1 : 1;
     let res = null;
@@ -1522,20 +1539,11 @@ async function runOneCommand(rawLine, depth, ctx) {
             await new Promise(r => setTimeout(r, retryInterval));
         }
         ctx.progress.report({ message: `${finalCmd}${retryCount > 0 ? ` (try ${attempts + 1})` : ''}` });
-        if (ctx.cfg.toterminal) {
-            res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token, (chunk, isStderr) => {
-                const text = isStderr ? `[stderr] ${chunk}` : chunk;
-                outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(text);
-                ctx.consoles += text;
-            });
-        }
-        else {
-            res = await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => {
-                const text = isStderr ? `[stderr] ${chunk}` : chunk;
-                outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(text);
-                ctx.consoles += text;
-            }, currentEnv);
-        }
+        res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token, (chunk, isStderr) => {
+            const text = isStderr ? `[stderr] ${chunk}` : chunk;
+            outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(text);
+            ctx.consoles += text;
+        });
         let suffix = "";
         if (res.timedOut) {
             suffix += `\n[timeout after ${ctx.cfg.timeout}ms]\n`;
@@ -1608,10 +1616,7 @@ async function runParallelGroup(rawLines, depth, ctx) {
         }
         ctx.progress.report({ message: `[parallel] ${finalCmd}` });
         const taskStart = Date.now();
-        // In terminal mode, parallel tasks are serialized through the single terminal
-        const res = ctx.cfg.toterminal
-            ? await execViaTerminal(finalCmd, ctx.cfg, ctx.token, (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`))
-            : await execAsync(finalCmd, ctx.cfg, ctx.token, getCurrentCwd(), (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`), currentEnv);
+        const res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token, (chunk, isStderr) => outputChannel === null || outputChannel === void 0 ? void 0 : outputChannel.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`));
         const taskEnd = Date.now();
         let suffix = "";
         if (res.timedOut) {

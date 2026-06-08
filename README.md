@@ -827,6 +827,152 @@ Without the flag the extension falls back to the temp-file polling strategy (wor
 
 `encoding-japanese` has been removed from the runtime dependencies.
 
+# v1.5.1: タイムアウト処理の改善
+
+## 1. アクティビティベースのタイムアウト
+
+v1.5.0 まではコマンド起動時点から一定時間で打ち切る「固定タイムアウト」でした。  
+v1.5.1 では**出力が届いている限りタイマーをリセットする「無活動タイムアウト」**に変更しました。
+
+| モード | タイマーリセット条件 |
+|---|---|
+| Shell Integration モード | `execution.read()` から非空チャンクを受信するたび |
+| テンポラリファイル fallback モード | 出力ファイルのサイズが増加するたび |
+
+### 変更前後の挙動比較
+
+| 状況 | v1.5.0 (固定) | v1.5.1 (無活動) |
+|---|---|---|
+| ログを垂れ流す長時間コマンド | `lc4ri.timeout` 経過後に強制終了 | 出力が続く限り実行継続 |
+| 途中でフリーズしたコマンド | `lc4ri.timeout` 経過後に強制終了 | 最後の出力から `lc4ri.timeout` 経過後に強制終了 |
+| 無音で長時間動くコマンド（ビルド等） | 早期タイムアウトの可能性あり | 変わらず早期タイムアウトの可能性あり → `lc4ri.timeout` を大きくする |
+
+### 注意
+
+`lc4ri.timeout` の意味が変わりました。以前は「コマンド開始からの最大待機時間」でしたが、v1.5.1 以降は「**最後の出力から次の出力が来るまでの最大待機時間（無活動時間）**」です。  
+完全に無音で動く長時間バッチ処理がある場合は、`lc4ri.timeout` を処理時間よりも大きく設定してください。
+
+---
+
+# v1.5.2: Windows / PowerShell 対応
+
+v1.5.2 はすべての機能を Windows 環境（PowerShell / CMD）で動作させることを目的とした互換性リリースです。**既存の Linux / macOS ドキュメントと設定はそのまま動作します。**
+
+## 1. テンポラリファイル fallback の Windows 対応
+
+Shell Integration API が利用できない場合に使用する fallback 実行経路を Windows 対応しました。
+
+| 項目 | v1.5.1 | v1.5.2 |
+|---|---|---|
+| 一時ファイル置き場 | `/tmp` ハードコード | `os.tmpdir()`（Windows では `%TEMP%`）|
+| ファイルパス生成 | `folder.uri.path`（URI 形式） | `folder.uri.fsPath`（OS ネイティブ区切り）|
+| シェルラッパー構文 | POSIX sh のみ | PowerShell / POSIX sh を自動切り替え |
+
+PowerShell 用ラッパーは `Out-File -Encoding utf8` と `$LASTEXITCODE` を使用します。
+
+## 2. `cd` 追跡の PowerShell 対応
+
+`cd` コマンドの実行後に新しい作業ディレクトリを取得する方法を PowerShell 向けに変更しました。
+
+```
+# bash / zsh (変更なし)
+cd <path> && pwd
+
+# PowerShell (新規)
+try { cd <path> } catch { exit 1 }; (Get-Location).Path
+```
+
+`&&` は PowerShell 5.1 で未対応のため `try/catch` に切り替えています。`cd` が失敗した場合は `exit 1` で即座に非ゼロ終了します。
+
+## 3. `export` / 環境変数取得の PowerShell 対応
+
+`export VAR=val` 実行後に環境変数の一覧を取得するコマンドを PowerShell 向けに変更しました。
+
+```
+# bash / zsh (変更なし)
+export VAR=val && env
+
+# PowerShell (新規)
+$env:VAR = 'val'; Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" }
+```
+
+出力フォーマットは `NAME=VALUE` 形式で統一されているため、変数キャプチャの解析ロジックはそのまま動作します。
+
+## 4. PowerShell `$env:` 代入のネイティブ追跡
+
+PowerShell の `$env:VARNAME = value` 構文を `export VAR=val` と同様にネイティブ追跡するようになりました。
+
+```markdown
+- $env:KUBECONFIG = 'C:\Users\me\.kube\config'
+    - kubectl get nodes
+```
+
+`isPurePsEnvCommand()` が代入を検出し、`resolvePsEnv()` が変数値をキャプチャして拡張機能内部の環境変数テーブルに保存します。セミコロン・パイプ・`&` を含む複合文は対象外（通常コマンドとして実行）です。
+
+## 5. `lc4ri.shell` 設定の追加
+
+アクティブターミナルのシェル種別を明示的に指定できる設定を追加しました。
+
+| 値 | 動作 |
+|---|---|
+| `null`（デフォルト）| OS を自動判定（Windows → PowerShell、その他 → bash）|
+| `"powershell"` | Windows でも macOS/Linux でも PowerShell 構文を使用 |
+| `"bash"` | Windows 上で Git Bash / WSL を使用している場合に指定 |
+| `"cmd"` | CMD を使用（将来拡張用）|
+
+```jsonc
+// Windows で Git Bash を使う場合
+{ "lc4ri.shell": "bash" }
+
+// macOS で PowerShell Core を使う場合
+{ "lc4ri.shell": "powershell" }
+```
+
+## 6. `lc4ri.template` 設定の復活
+
+v1.5.0 で削除された OS 別コマンドラッパー設定 `lc4ri.template` を復活させました。プロファイル未選択時に `process.platform` をキーとして参照されます。
+
+```jsonc
+{
+  "lc4ri.template": {
+    "win32":  "wsl -e {COMMAND}",
+    "linux":  "ssh ops@prod {COMMAND}",
+    "darwin": "ssh ops@prod {COMMAND}"
+  }
+}
+```
+
+プロファイルが選択されている場合はプロファイルが優先されます（`applyTemplate` の優先順位: プロファイル → OS テンプレート → そのまま）。
+
+## 7. Windows 向け危険パターンの追加
+
+`lc4ri.dangerousPatterns` のデフォルトセットに Windows 固有の危険コマンドを追加しました。
+
+| パターン | 対象コマンド例 |
+|---|---|
+| `rd /s /q` | `rd /s /q C:\Windows` |
+| `format <ドライブ>:` | `format D:` |
+| `del /f /s /q` | `del /f /s /q C:\tmp\*` |
+| `Remove-Item -Recurse -Force` | `Remove-Item ./critical -Recurse -Force` |
+
+## 8. 動作環境まとめ
+
+| 環境 | Shell Integration あり | Shell Integration なし（fallback） |
+|---|---|---|
+| Linux / macOS — bash / zsh | ✅ 完全動作 | ✅ 完全動作 |
+| Windows — PowerShell | ✅ 完全動作 | ✅ v1.5.2 で対応 |
+| Windows — Git Bash / WSL | ✅ 完全動作（`lc4ri.shell: "bash"` 推奨） | ✅ bash モードで動作 |
+| Windows — CMD | ✅ 実行可能 | ⚠ cd/export 追跡は未対応 |
+
+## 9. 開発者向け変更
+
+- `isWindowsShell(cfg)` をエクスポート — シェル種別を返すヘルパー
+- `applyTemplate()` をエクスポート（`applyProfile` は deprecated alias として残存）
+- `isPurePsEnvCommand()` をエクスポート — PowerShell `$env:` 代入検出
+- テストケース数: 147 → 164
+
+---
+
 # LICENSE
 
 MIT License

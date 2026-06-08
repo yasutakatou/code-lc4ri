@@ -82,18 +82,25 @@ truthy('regex kind',    a3 && a3.kind === 'regex' && a3.arg.test('FOO'));
 truthy('no match',      ext.parseAssert('plain') === null);
 
 console.log('applyTemplate (profile beats per-OS template)');
-const cfg = {
+const cfg: import('../src/extension').LC4RIConfig = {
     timeout: 0, template: { linux: 'L({COMMAND})', win32: 'W({COMMAND})', darwin: 'D({COMMAND})' },
     profiles: { ssh: 'ssh host {COMMAND}' },
     changeWord: {}, toutf8: false, toterminal: false, outputFormat: 'codeblock' as const,
     dangerousPatterns: [], allowList: [], denyList: [], confirmDangerous: false,
     showCodeLens: true, shell: null
 };
-eq('with profile',  ext.applyTemplate('ls', cfg, 'ssh'),   'ssh host ls');
+eq('with profile',      ext.applyTemplate('ls', cfg, 'ssh'), 'ssh host ls');
+eq('empty profile',     ext.applyTemplate('ls', { ...cfg, template: {} }, ''), 'ls');
 const osTemplate = cfg.template[process.platform as keyof typeof cfg.template];
 if (osTemplate) {
     eq('no profile -> os', ext.applyTemplate('ls', cfg, ''), osTemplate.replace('{COMMAND}', 'ls'));
 }
+
+console.log('isWindowsShell');
+truthy('null + win32 is win',     ext.isWindowsShell({ ...cfg, shell: null })  === (process.platform === 'win32'));
+truthy('powershell explicit',     ext.isWindowsShell({ ...cfg, shell: 'powershell' }) === true);
+truthy('bash explicit is not win',ext.isWindowsShell({ ...cfg, shell: 'bash' }) === false);
+truthy('cmd explicit is not ps',  ext.isWindowsShell({ ...cfg, shell: 'cmd' }) === false);
 
 console.log('checkSecurity');
 const sec = ext.checkSecurity('rm -rf /', { ...cfg, dangerousPatterns: ext.DEFAULT_DANGEROUS_PATTERNS });
@@ -104,6 +111,16 @@ const allow = ext.checkSecurity('ls', { ...cfg, allowList: ['^ls$'] });
 truthy('allow works', allow.ok === true);
 const notAllowed = ext.checkSecurity('rm', { ...cfg, allowList: ['^ls$'] });
 truthy('not in allow', notAllowed.ok === false);
+
+console.log('checkSecurity — Windows dangerous patterns');
+const dp = ext.DEFAULT_DANGEROUS_PATTERNS;
+const secCfg = { ...cfg, dangerousPatterns: dp };
+truthy('rd /s /q flagged',               ext.checkSecurity('rd /s /q C:\\foo', secCfg).dangerous !== undefined);
+truthy('format C: flagged',              ext.checkSecurity('format C:', secCfg).dangerous !== undefined);
+truthy('Remove-Item -Recurse -Force',    ext.checkSecurity('Remove-Item ./dir -Recurse -Force', secCfg).dangerous !== undefined);
+truthy('Remove-Item -Force -Recurse',    ext.checkSecurity('Remove-Item ./dir -Force -Recurse', secCfg).dangerous !== undefined);
+truthy('del /f /s /q flagged',           ext.checkSecurity('del /f /s /q C:\\tmp', secCfg).dangerous !== undefined);
+truthy('normal dir not flagged',         ext.checkSecurity('dir C:\\Users', secCfg).dangerous === undefined);
 
 console.log('normalizeIndent');
 eq('no indent',     ext.normalizeIndent('- a'),         '- a');
@@ -239,6 +256,19 @@ truthy('export | cat is NOT',       !ext.isPureExportCommand('export FOO=bar | c
 truthy('unset is NOT',              !ext.isPureExportCommand('unset FOO'));
 truthy('echo export is NOT',        !ext.isPureExportCommand('echo export'));
 truthy('exportfoo is NOT',          !ext.isPureExportCommand('exportfoo=1'));
+
+console.log('isPurePsEnvCommand');
+truthy('$env:FOO = bar',              ext.isPurePsEnvCommand('$env:FOO = bar'));
+truthy('$env:FOO="value"',            ext.isPurePsEnvCommand('$env:FOO="value"'));
+truthy('$env:MY_VAR = 42',            ext.isPurePsEnvCommand('$env:MY_VAR = 42'));
+truthy("$env:X = 'hello world'",      ext.isPurePsEnvCommand("$env:X = 'hello world'"));
+truthy('leading whitespace ok',       ext.isPurePsEnvCommand('  $env:A = 1'));
+truthy('env:FOO = bar is NOT',        !ext.isPurePsEnvCommand('env:FOO = bar'));
+truthy('$FOO = bar is NOT',           !ext.isPurePsEnvCommand('$FOO = bar'));
+truthy('$env: alone is NOT',          !ext.isPurePsEnvCommand('$env:'));
+truthy('$env:FOO == bar is NOT (==)', !ext.isPurePsEnvCommand('$env:FOO == bar'));
+truthy('$env:FOO = a; cmd is NOT',    !ext.isPurePsEnvCommand('$env:FOO = a; cmd'));
+truthy('$env:FOO = a | cmd is NOT',   !ext.isPurePsEnvCommand('$env:FOO = a | cmd'));
 
 console.log('getCurrentEnv / setCurrentEnv');
 ext.setCurrentEnv({});
