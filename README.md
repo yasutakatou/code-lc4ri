@@ -1021,6 +1021,65 @@ All existing runbooks and settings continue to work. If you need a blank line to
 
 ---
 
+# v1.5.5: Output placement fix
+
+## 1. Correct output block placement during streaming
+
+`syncOutput` runs on a 200 ms interval while a command is executing. In v1.5.3, the first sync fired before the stop position (horizon line or blank-line boundary) had been determined, causing the output block to be inserted at the wrong location.
+
+v1.5.5 pre-scans the remaining lines at the start of `runLines` to record the `horizonFlag` / `blankStopFlag` positions before any sync can fire. The output block is now placed correctly even on the very first flush.
+
+| Scenario | v1.5.3 behaviour | v1.5.5 behaviour |
+|---|---|---|
+| Command before a `***` separator | Output occasionally placed after the separator | Always placed before the separator |
+| Command before a blank-line boundary | Output occasionally placed past the blank line | Always placed in the right code block |
+
+No settings or document changes are required.
+
+---
+
+# v1.5.6: Runbook-relative paths and cd tracking improvement
+
+## 1. `write:` directive resolves relative to the runbook file
+
+Previously, if `currentCwd` had not been set by an earlier `cd` command, relative paths in `write:` resolved against the workspace root folder. From v1.5.6, the initial working directory is set to **the directory that contains the runbook file** the moment execution starts.
+
+````markdown
+- write: output/config.yaml
+  ```yaml
+  host: localhost
+  ```
+````
+
+| Scenario | v1.5.5 and earlier | v1.5.6 |
+|---|---|---|
+| No `cd` executed yet, runbook is `/docs/deploy.md` | Writes to `<workspace root>/output/config.yaml` | Writes to `/docs/output/config.yaml` |
+| After `- cd subdir` | Writes to `subdir/output/config.yaml` relative to whatever the previous cwd was | Same — `cd` tracking is unchanged |
+| Absolute path (`write: /tmp/out.yaml`) | Absolute — always correct | Same |
+
+Variable substitution, dry-run preview, and AND-chain depth rules are unchanged.
+
+## 2. `cd` tracking: locally-resolved absolute paths
+
+For `cd <path>` commands where the target is resolvable without querying the shell (i.e., any target other than `cd -` or bare `cd`), the extension now:
+
+1. Computes the absolute destination locally from the tracked cwd.
+2. Sends an absolute `cd` to the terminal instead of the original relative form.
+
+This prevents the terminal's own working directory from drifting relative to the extension's tracked cwd across multiple document runs or after `Reload Window`.
+
+| Command | v1.5.5 terminal receives | v1.5.6 terminal receives |
+|---|---|---|
+| `- cd subdir` | `cd subdir` | `cd '/abs/path/to/subdir'` |
+| `- cd /opt/app` | `cd /opt/app` | `cd '/opt/app'` (unchanged) |
+| `- cd -` | `cd - && pwd` | `cd - && pwd` (unchanged — shell must resolve) |
+
+## 3. `getCurrentCwd()` robustness
+
+The internal `getCurrentCwd()` helper no longer calls `fs.existsSync()` on the cached path. The cached value is trusted as-is once set, removing an unnecessary filesystem round-trip and eliminating a subtle edge case where a valid but newly-created directory was rejected on first access.
+
+---
+
 # LICENSE
 
 MIT License

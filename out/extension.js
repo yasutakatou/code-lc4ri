@@ -801,7 +801,7 @@ function execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData) {
 // =============================================================================
 function getCurrentCwd() {
     var _a;
-    if (currentCwd && fs.existsSync(currentCwd)) {
+    if (currentCwd !== undefined) {
         return currentCwd;
     }
     const folder = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0];
@@ -972,21 +972,38 @@ function isPureCdCommand(cmd) {
 }
 async function resolveCd(cdCmd, cfg, token) {
     var _a;
-    // On PowerShell: `&&` is PS7+ only; use try/catch so a failed cd exits non-zero.
-    // `(Get-Location).Path` outputs just the path string without any object formatting.
+    const rawTarget = cdCmd.trim().replace(/^cd\s*/i, '').trim();
+    // For targets we can resolve locally, compute the absolute path from the tracked cwd
+    // and send an absolute cd to the terminal. This prevents the terminal's own cwd from
+    // accumulating relative moves across multiple document runs.
+    if (rawTarget && rawTarget !== '-') {
+        const expanded = rawTarget.replace(/^~(?=\/|$)/, os.homedir());
+        const resolved = path.isAbsolute(expanded)
+            ? expanded
+            : path.resolve(getCurrentCwd(), expanded);
+        // Send absolute cd to the terminal so subsequent commands run in the right directory.
+        const absCdCmd = isWindowsShell(cfg)
+            ? `try { Set-Location -LiteralPath "${resolved.replace(/`/g, '``').replace(/"/g, '`"')}" } catch { exit 1 }`
+            : `cd '${resolved.replace(/'/g, "'\\''")}'`;
+        const res = await execViaTerminal(absCdCmd, cfg, token);
+        if (res.cancelled) {
+            return { ok: false, output: 'cancelled' };
+        }
+        return { ok: true, newCwd: resolved, output: resolved };
+    }
+    // `cd -` or bare `cd` — the target is only known by the shell, so ask the terminal.
     const fullCmd = isWindowsShell(cfg)
         ? `try { ${cdCmd} } catch { exit 1 }; (Get-Location).Path`
         : `${cdCmd} && pwd`;
     const res = await execViaTerminal(fullCmd, cfg, token);
-    if (res.code !== 0 || res.timedOut || res.cancelled) {
-        return { ok: false, output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
+    if (!res.timedOut && !res.cancelled && res.code === 0) {
+        const lines = res.stdout.replace(/\r?\n+$/, '').split(/\r?\n/);
+        const newCwd = (_a = lines[lines.length - 1]) === null || _a === void 0 ? void 0 : _a.trim();
+        if (newCwd) {
+            return { ok: true, newCwd, output: newCwd };
+        }
     }
-    const lines = res.stdout.replace(/\r?\n+$/, '').split(/\r?\n/);
-    const newCwd = (_a = lines[lines.length - 1]) === null || _a === void 0 ? void 0 : _a.trim();
-    if (!newCwd) {
-        return { ok: false, output: 'could not determine new cwd' };
-    }
-    return { ok: true, newCwd, output: newCwd };
+    return { ok: false, output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
 }
 async function runFromCursor(opts) {
     const cfg = readConfig();
@@ -1000,6 +1017,9 @@ async function runFromCursor(opts) {
         opts = { dryRun: true };
     }
     const doc = editor.document;
+    if (currentCwd === undefined && doc.uri.scheme === 'file') {
+        currentCwd = path.dirname(doc.uri.fsPath);
+    }
     const position = editor.selection.active;
     const startPos = new vscode.Position(position.line, 0);
     const endPos = new vscode.Position(doc.lineCount - 1, 10000);

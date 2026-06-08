@@ -801,7 +801,7 @@ function execViaShellIntegration(cmd, cfg, terminal, shellInt, token, onData) {
 // =============================================================================
 function getCurrentCwd() {
     var _a;
-    if (currentCwd && fs.existsSync(currentCwd)) {
+    if (currentCwd !== undefined) {
         return currentCwd;
     }
     const folder = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0];
@@ -978,15 +978,30 @@ async function resolveCd(cdCmd, cfg, token) {
         ? `try { ${cdCmd} } catch { exit 1 }; (Get-Location).Path`
         : `${cdCmd} && pwd`;
     const res = await execViaTerminal(fullCmd, cfg, token);
-    if (res.code !== 0 || res.timedOut || res.cancelled) {
-        return { ok: false, output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
+    if (!res.timedOut && !res.cancelled && res.code === 0) {
+        const lines = res.stdout.replace(/\r?\n+$/, '').split(/\r?\n/);
+        const newCwd = (_a = lines[lines.length - 1]) === null || _a === void 0 ? void 0 : _a.trim();
+        if (newCwd) {
+            return { ok: true, newCwd, output: newCwd };
+        }
     }
-    const lines = res.stdout.replace(/\r?\n+$/, '').split(/\r?\n/);
-    const newCwd = (_a = lines[lines.length - 1]) === null || _a === void 0 ? void 0 : _a.trim();
-    if (!newCwd) {
-        return { ok: false, output: 'could not determine new cwd' };
+    // Terminal-based resolution failed or was unavailable.
+    // Fall back to local path resolution so that write/include directives
+    // still track the intended directory even without an active terminal.
+    if (!res.cancelled) {
+        const target = cdCmd.trim().replace(/^cd\s*/i, '').trim();
+        if (target && target !== '-') {
+            try {
+                const expanded = target.replace(/^~(?=\/|$)/, os.homedir());
+                const resolved = path.isAbsolute(expanded)
+                    ? expanded
+                    : path.resolve(getCurrentCwd(), expanded);
+                return { ok: true, newCwd: resolved, output: resolved };
+            }
+            catch (_) { }
+        }
     }
-    return { ok: true, newCwd, output: newCwd };
+    return { ok: false, output: (res.stderr || res.stdout || `cd failed (exit ${res.code})`).replace(/\r?\n+$/, '') };
 }
 async function runFromCursor(opts) {
     const cfg = readConfig();
@@ -1000,6 +1015,9 @@ async function runFromCursor(opts) {
         opts = { dryRun: true };
     }
     const doc = editor.document;
+    if (currentCwd === undefined && doc.uri.scheme === 'file') {
+        currentCwd = path.dirname(doc.uri.fsPath);
+    }
     const position = editor.selection.active;
     const startPos = new vscode.Position(position.line, 0);
     const endPos = new vscode.Position(doc.lineCount - 1, 10000);
