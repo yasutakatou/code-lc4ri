@@ -1043,6 +1043,35 @@ interface RunContext {
 }
 
 async function runLines(lines: string[], ctx: RunContext): Promise<void> {
+    // ③ syncOutput はコマンド実行中(200ms 間隔)に呼ばれるため、
+    //    停止位置(--- 行 / コマンド後の空行)を先読みして blankStopFlag /
+    //    horizonFlag に設定しておく。これがないと初回 sync 時点では
+    //    停止位置が未確定で、出力がドキュメント末尾に置かれてしまう。
+    {
+        const baseLine = ctx.nowLine;
+        let sawCommand = false;
+        for (let p = 0; p < lines.length; p++) {
+            const cur = lines[p];
+            if (horizonCheck(cur)) {
+                if (ctx.horizonFlag < 0) { ctx.horizonFlag = baseLine + p; }
+                break;
+            }
+            if (cur.trim() === '') {
+                if (sawCommand) {
+                    if (ctx.blankStopFlag < 0) { ctx.blankStopFlag = baseLine + p; }
+                    break;
+                }
+                continue;
+            }
+            // 「``` や - で指定されたコマンドが書かれた行」相当の判定
+            if (/^[\t ]*-\s/.test(cur)
+                || /^[\t ]*(`{3,}|~{3,})\s*(bash|zsh|sh|yaml|conf|json)\b/i.test(cur)
+                || /^[1-9]\.\s/.test(cur)) {
+                sawCommand = true;
+            }
+        }
+    }
+
     for (let i = 0; i < lines.length; i++) {
         if (ctx.token.isCancellationRequested) {
             persistentVars.num   = { ...ctx.vars.num };
