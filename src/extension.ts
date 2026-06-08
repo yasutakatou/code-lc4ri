@@ -1064,6 +1064,14 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
             break;
         }
 
+        // ⑤ Blank line stops execution after commands have run — write results before continuing
+        if (line.trim() === '' && ctx.execFlag) {
+            ctx.horizonFlag = ctx.nowLine;
+            persistentVars.num   = { ...ctx.vars.num };
+            persistentVars.named = { ...ctx.vars.named };
+            break;
+        }
+
         const envMatch = line.match(/^#\s*env:\s*(.+)$/);
         if (envMatch) {
             const envPath = envMatch[1].trim();
@@ -1363,9 +1371,10 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
     }
     if (/^!\s+/.test(cleanBody)) {
         const termCmd = cleanBody.replace(/^!\s+/, '').trim();
-        ctx.consoles += `\n[ ! ${termCmd} ] ${getDate()}\n`;
+        if (ctx.consoles.length > 0) { ctx.consoles += '\n---\n'; }
+        ctx.consoles += `[ ! ${termCmd} ] ${getDate()}\n`;
         ctx.execFlag = true;
-        if (ctx.dryRun) { ctx.consoles += `[dry-run: terminal] ${termCmd}\n`; } 
+        if (ctx.dryRun) { ctx.consoles += `[dry-run: terminal] ${termCmd}\n`; }
         else { vscode.window.activeTerminal?.sendText(termCmd); ctx.consoles += `(sent to terminal)\n`; }
         ctx.execCount = depth + 1;
         return;
@@ -1376,7 +1385,8 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
     const sec = checkSecurity(finalCmd, ctx.cfg);
 
     ctx.execFlag = true;
-    ctx.consoles += `\n[ ${finalCmd} ] ${getDate()}\n`;
+    if (ctx.consoles.length > 0) { ctx.consoles += '\n---\n'; }
+    ctx.consoles += `[ ${finalCmd} ] ${getDate()}\n`;
 
     if (!sec.ok) {
         ctx.consoles += `(blocked by security: ${sec.reason})\n`;
@@ -1514,7 +1524,7 @@ async function runParallelGroup(rawLines: string[], depth: number, ctx: RunConte
         const rawBody = rawLine.replace(depthRe, '');
         const { body: cleanBody, bindName } = extractBinding(detectParallelFlag(rawBody).body);
         const finalCmd = applyTemplate(applyChangeWord(substituteVars(cleanBody, ctx.vars), ctx.cfg.changeWord), ctx.cfg, ctx.profile);
-        const header = `\n[ ${finalCmd} ] ${getDate()}\n`;
+        const header = `[ ${finalCmd} ] ${getDate()}\n`;
 
         if (ctx.dryRun) { return { header, output: `[dry-run] ${finalCmd}\n`, ok: true, bindName, bindVal: '', startMs: groupStartMs, endMs: groupStartMs }; }
         const sec = checkSecurity(finalCmd, ctx.cfg);
@@ -1540,6 +1550,7 @@ async function runParallelGroup(rawLines: string[], depth: number, ctx: RunConte
 
     const results = await Promise.all(tasks);
     for (const r of results) {
+        if (ctx.consoles.length > 0) { ctx.consoles += '\n---\n'; }
         ctx.consoles += r.header + r.output;
         if (r.bindName) { ctx.vars.named[r.bindName] = r.bindVal; }
     }

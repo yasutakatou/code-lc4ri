@@ -827,110 +827,109 @@ Without the flag the extension falls back to the temp-file polling strategy (wor
 
 `encoding-japanese` has been removed from the runtime dependencies.
 
-# v1.5.1: タイムアウト処理の改善
+# v1.5.1: Improved timeout behaviour
 
-## 1. アクティビティベースのタイムアウト
+## 1. Activity-based timeout
 
-v1.5.0 まではコマンド起動時点から一定時間で打ち切る「固定タイムアウト」でした。  
-v1.5.1 では**出力が届いている限りタイマーをリセットする「無活動タイムアウト」**に変更しました。
+Prior to v1.5.0 a fixed timer started at command launch and killed the process after `lc4ri.timeout` ms regardless of whether output was still arriving.  
+v1.5.1 changes this to an **inactivity timeout** — the timer resets every time new output is received.
 
-| モード | タイマーリセット条件 |
+| Mode | Timer reset condition |
 |---|---|
-| Shell Integration モード | `execution.read()` から非空チャンクを受信するたび |
-| テンポラリファイル fallback モード | 出力ファイルのサイズが増加するたび |
+| Shell Integration mode | Every time a non-empty chunk is received from `execution.read()` |
+| Temp-file fallback mode | Every time the output file size increases |
 
-### 変更前後の挙動比較
+### Behaviour comparison
 
-| 状況 | v1.5.0 (固定) | v1.5.1 (無活動) |
+| Situation | v1.5.0 (fixed) | v1.5.1 (inactivity) |
 |---|---|---|
-| ログを垂れ流す長時間コマンド | `lc4ri.timeout` 経過後に強制終了 | 出力が続く限り実行継続 |
-| 途中でフリーズしたコマンド | `lc4ri.timeout` 経過後に強制終了 | 最後の出力から `lc4ri.timeout` 経過後に強制終了 |
-| 無音で長時間動くコマンド（ビルド等） | 早期タイムアウトの可能性あり | 変わらず早期タイムアウトの可能性あり → `lc4ri.timeout` を大きくする |
+| Long-running command streaming logs | Killed after `lc4ri.timeout` | Runs as long as output keeps arriving |
+| Command that freezes mid-run | Killed after `lc4ri.timeout` | Killed `lc4ri.timeout` ms after the last output |
+| Silent long-running command (build, etc.) | May time out early | Still may time out early — increase `lc4ri.timeout` |
 
-### 注意
+### Note
 
-`lc4ri.timeout` の意味が変わりました。以前は「コマンド開始からの最大待機時間」でしたが、v1.5.1 以降は「**最後の出力から次の出力が来るまでの最大待機時間（無活動時間）**」です。  
-完全に無音で動く長時間バッチ処理がある場合は、`lc4ri.timeout` を処理時間よりも大きく設定してください。
+The meaning of `lc4ri.timeout` has changed. Previously it was the maximum wall-clock time from command start. From v1.5.1 onward it is the **maximum idle time between consecutive output chunks**. For completely silent long-running batch jobs, set `lc4ri.timeout` larger than the expected run time.
 
 ---
 
-# v1.5.2: Windows / PowerShell 対応
+# v1.5.2: Windows / PowerShell support
 
-v1.5.2 はすべての機能を Windows 環境（PowerShell / CMD）で動作させることを目的とした互換性リリースです。**既存の Linux / macOS ドキュメントと設定はそのまま動作します。**
+v1.5.2 is a compatibility release focused on making every feature work on Windows (PowerShell / CMD). **Existing Linux / macOS documents and settings continue to work without any changes.**
 
-## 1. テンポラリファイル fallback の Windows 対応
+## 1. Temp-file fallback: Windows support
 
-Shell Integration API が利用できない場合に使用する fallback 実行経路を Windows 対応しました。
+The fallback execution path used when the Shell Integration API is unavailable has been updated for Windows.
 
-| 項目 | v1.5.1 | v1.5.2 |
+| Item | v1.5.1 | v1.5.2 |
 |---|---|---|
-| 一時ファイル置き場 | `/tmp` ハードコード | `os.tmpdir()`（Windows では `%TEMP%`）|
-| ファイルパス生成 | `folder.uri.path`（URI 形式） | `folder.uri.fsPath`（OS ネイティブ区切り）|
-| シェルラッパー構文 | POSIX sh のみ | PowerShell / POSIX sh を自動切り替え |
+| Temp file location | Hardcoded `/tmp` | `os.tmpdir()` (`%TEMP%` on Windows) |
+| Path construction | `folder.uri.path` (URI format) | `folder.uri.fsPath` (OS-native separators) |
+| Shell wrapper syntax | POSIX sh only | Auto-switches between PowerShell and POSIX sh |
 
-PowerShell 用ラッパーは `Out-File -Encoding utf8` と `$LASTEXITCODE` を使用します。
+The PowerShell wrapper uses `Out-File -Encoding utf8` and `$LASTEXITCODE`.
 
-## 2. `cd` 追跡の PowerShell 対応
+## 2. `cd` tracking: PowerShell support
 
-`cd` コマンドの実行後に新しい作業ディレクトリを取得する方法を PowerShell 向けに変更しました。
+The method for obtaining the new working directory after a `cd` command has been updated for PowerShell.
 
 ```
-# bash / zsh (変更なし)
+# bash / zsh (unchanged)
 cd <path> && pwd
 
-# PowerShell (新規)
+# PowerShell (new)
 try { cd <path> } catch { exit 1 }; (Get-Location).Path
 ```
 
-`&&` は PowerShell 5.1 で未対応のため `try/catch` に切り替えています。`cd` が失敗した場合は `exit 1` で即座に非ゼロ終了します。
+`&&` is not supported in PowerShell 5.1, so `try/catch` is used instead. A failed `cd` exits with code 1 immediately.
 
-## 3. `export` / 環境変数取得の PowerShell 対応
+## 3. `export` / env capture: PowerShell support
 
-`export VAR=val` 実行後に環境変数の一覧を取得するコマンドを PowerShell 向けに変更しました。
+The command used to dump environment variables after `export VAR=val` has been updated for PowerShell.
 
 ```
-# bash / zsh (変更なし)
+# bash / zsh (unchanged)
 export VAR=val && env
 
-# PowerShell (新規)
+# PowerShell (new)
 $env:VAR = 'val'; Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" }
 ```
 
-出力フォーマットは `NAME=VALUE` 形式で統一されているため、変数キャプチャの解析ロジックはそのまま動作します。
+The output format is consistent (`NAME=VALUE`) so the variable capture parsing logic is unchanged.
 
-## 4. PowerShell `$env:` 代入のネイティブ追跡
+## 4. Native tracking of PowerShell `$env:` assignments
 
-PowerShell の `$env:VARNAME = value` 構文を `export VAR=val` と同様にネイティブ追跡するようになりました。
+The PowerShell `$env:VARNAME = value` syntax is now tracked natively, just like `export VAR=val`.
 
 ```markdown
 - $env:KUBECONFIG = 'C:\Users\me\.kube\config'
     - kubectl get nodes
 ```
 
-`isPurePsEnvCommand()` が代入を検出し、`resolvePsEnv()` が変数値をキャプチャして拡張機能内部の環境変数テーブルに保存します。セミコロン・パイプ・`&` を含む複合文は対象外（通常コマンドとして実行）です。
+`isPurePsEnvCommand()` detects the assignment; `resolvePsEnv()` captures the value and stores it in the extension's internal env table. Compound statements containing `;`, `|`, or `&` are excluded and run as regular commands.
 
-## 5. `lc4ri.shell` 設定の追加
+## 5. New `lc4ri.shell` setting
 
-アクティブターミナルのシェル種別を明示的に指定できる設定を追加しました。
+A new setting lets you explicitly specify the shell type used by the active terminal.
 
-| 値 | 動作 |
+| Value | Behaviour |
 |---|---|
-| `null`（デフォルト）| OS を自動判定（Windows → PowerShell、その他 → bash）|
-| `"powershell"` | Windows でも macOS/Linux でも PowerShell 構文を使用 |
-| `"bash"` | Windows 上で Git Bash / WSL を使用している場合に指定 |
-| `"cmd"` | CMD を使用（将来拡張用）|
+| `null` (default) | Auto-detect from OS (Windows → PowerShell, others → bash) |
+| `"powershell"` | Use PowerShell syntax on any OS |
+| `"bash"` | Use bash syntax on Windows (Git Bash / WSL) |
+| `"cmd"` | Use CMD (reserved for future use) |
 
 ```jsonc
-// Windows で Git Bash を使う場合
+// Using Git Bash on Windows
 { "lc4ri.shell": "bash" }
 
-// macOS で PowerShell Core を使う場合
+// Using PowerShell Core on macOS
 { "lc4ri.shell": "powershell" }
 ```
 
-## 6. `lc4ri.template` 設定の復活
+## 6. `lc4ri.template` restored
 
-v1.5.0 で削除された OS 別コマンドラッパー設定 `lc4ri.template` を復活させました。プロファイル未選択時に `process.platform` をキーとして参照されます。
+The per-OS command wrapper setting `lc4ri.template`, removed in v1.5.0, has been restored. It is looked up by `process.platform` when no profile is selected.
 
 ```jsonc
 {
@@ -942,34 +941,83 @@ v1.5.0 で削除された OS 別コマンドラッパー設定 `lc4ri.template` 
 }
 ```
 
-プロファイルが選択されている場合はプロファイルが優先されます（`applyTemplate` の優先順位: プロファイル → OS テンプレート → そのまま）。
+When a profile is selected it takes precedence (`applyTemplate` priority: profile → OS template → passthrough).
 
-## 7. Windows 向け危険パターンの追加
+## 7. Windows dangerous patterns added
 
-`lc4ri.dangerousPatterns` のデフォルトセットに Windows 固有の危険コマンドを追加しました。
+Windows-specific dangerous commands have been added to the default `lc4ri.dangerousPatterns` set.
 
-| パターン | 対象コマンド例 |
+| Pattern | Example command |
 |---|---|
 | `rd /s /q` | `rd /s /q C:\Windows` |
-| `format <ドライブ>:` | `format D:` |
+| `format <drive>:` | `format D:` |
 | `del /f /s /q` | `del /f /s /q C:\tmp\*` |
 | `Remove-Item -Recurse -Force` | `Remove-Item ./critical -Recurse -Force` |
 
-## 8. 動作環境まとめ
+## 8. Platform support matrix
 
-| 環境 | Shell Integration あり | Shell Integration なし（fallback） |
+| Environment | With Shell Integration | Without Shell Integration (fallback) |
 |---|---|---|
-| Linux / macOS — bash / zsh | ✅ 完全動作 | ✅ 完全動作 |
-| Windows — PowerShell | ✅ 完全動作 | ✅ v1.5.2 で対応 |
-| Windows — Git Bash / WSL | ✅ 完全動作（`lc4ri.shell: "bash"` 推奨） | ✅ bash モードで動作 |
-| Windows — CMD | ✅ 実行可能 | ⚠ cd/export 追跡は未対応 |
+| Linux / macOS — bash / zsh | ✅ Full support | ✅ Full support |
+| Windows — PowerShell | ✅ Full support | ✅ Added in v1.5.2 |
+| Windows — Git Bash / WSL | ✅ Full support (set `lc4ri.shell: "bash"`) | ✅ Works in bash mode |
+| Windows — CMD | ✅ Runs commands | ⚠ cd/export tracking not supported |
 
-## 9. 開発者向け変更
+## 9. Developer-side changes
 
-- `isWindowsShell(cfg)` をエクスポート — シェル種別を返すヘルパー
-- `applyTemplate()` をエクスポート（`applyProfile` は deprecated alias として残存）
-- `isPurePsEnvCommand()` をエクスポート — PowerShell `$env:` 代入検出
-- テストケース数: 147 → 164
+- `isWindowsShell(cfg)` exported — helper that returns the active shell type
+- `applyTemplate()` exported (`applyProfile` kept as a deprecated alias)
+- `isPurePsEnvCommand()` exported — detects PowerShell `$env:` assignments
+- Test cases: 147 → 164
+
+---
+
+# v1.5.3: Output block separators and blank-line stop
+
+## 1. `---` separator between command outputs
+
+When multiple commands run in one session, their outputs inside the code block are now separated by `---`.
+
+Runbook:
+```markdown
+- ls
+- pwd
+```
+
+Resulting output block:
+```
+[ ls ] Mon Jun 09 ...
+file1  file2
+---
+[ pwd ] Mon Jun 09 ...
+/home/user
+```
+
+Commands run with `[parallel]` are separated the same way.
+
+## 2. Blank line stops execution
+
+After at least one command has run, reaching a blank line (a line with no commands) stops execution and writes the results at that point.
+
+```markdown
+- ls
+- pwd
+          ← execution stops here; results for ls and pwd are written
+
+- date    ← move cursor here and run again
+```
+
+Blank lines now act as execution boundaries, just like `***` and `---` (3+ characters).
+
+| Stop trigger | Behaviour |
+|---|---|
+| `***` / `---` (3+ chars) | Stops as before (horizon line) |
+| ` ``` ` (closing output fence) | Stops as before |
+| Blank line (after commands have run) | **New in v1.5.3** |
+
+## 3. No breaking changes for existing documents
+
+All existing runbooks and settings continue to work. If you need a blank line to be transparent (i.e., commands on both sides should run together), remove the blank line between them and use `***` only where you want an explicit section boundary.
 
 ---
 
