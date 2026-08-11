@@ -1160,15 +1160,16 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
 
                     ctx.execFlag = true;
                     const header = `\n[ write: ${filename}${isRandom ? ' (auto-generated)' : ''} ] ${getDate()}\n`;
+                    const rendered = substituteVars(blk.content, ctx.vars);
 
                     if (ctx.dryRun) {
-                        const n = blk.content.split('\n').length;
+                        const n = rendered.split('\n').length;
                         ctx.consoles += header + `[dry-run] would write ${n} line(s) to ${resolved}\n`;
                     } else {
                         try {
                             fs.mkdirSync(path.dirname(resolved), { recursive: true });
-                            fs.writeFileSync(resolved, blk.content + '\n', 'utf8');
-                            const n = blk.content.split('\n').length;
+                            fs.writeFileSync(resolved, rendered + '\n', 'utf8');
+                            const n = rendered.split('\n').length;
                             ctx.consoles += header + `wrote ${n} line(s) to ${resolved}\n`;
                             pushReport({ command: `write: ${filename}`, rendered: `write: ${filename}`, output: `wrote ${n} line(s)`, code: 0, ts: getDate(), ok: true, startMs: Date.now(), endMs: Date.now(), isParallel: false, parallelGroup: -1 });
                         } catch (err) {
@@ -1216,14 +1217,15 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
         const promptDir = parsePromptDirective(line);
         if (promptDir !== null) {
             const { depth, bindName, message, secret } = promptDir;
-            const atExpected = new RegExp(regTab(ctx.execCount)).test(line);
-            const atTop      = new RegExp(regTab(0)).test(line);
-            if (!atExpected && !atTop) {
+            // A directive is reachable if its depth is within the chain already
+            // validated so far (ctx.execCount is a ceiling, not an exact match) —
+            // this allows multiple sibling directives at the same depth to run
+            // in sequence, not just a single one immediately followed by a deeper child.
+            if (depth > ctx.execCount) {
                 ctx.execCount = 0;
                 ctx.nowLine++;
                 continue;
             }
-            if (!atExpected) { ctx.execCount = 0; }
 
             ctx.execFlag = true;
             if (ctx.dryRun) {
@@ -1255,12 +1257,9 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
         const writeDir = parseWriteDirective(line);
         if (writeDir !== null) {
             const { depth, filePath } = writeDir;
-            const atExpected = new RegExp(regTab(ctx.execCount)).test(line);
-            const atTop      = new RegExp(regTab(0)).test(line);
-            if (!atExpected && !atTop) {
+            if (depth > ctx.execCount) {
                 ctx.execCount = 0; ctx.nowLine++; continue;
             }
-            if (!atExpected) { ctx.execCount = 0; }
 
             const blk = collectFencedBlock(lines, i + 1);
             const resolved = path.isAbsolute(filePath) ? filePath : path.join(getCurrentCwd(), filePath);
@@ -1270,49 +1269,61 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
             if (blk.content === null) {
                 ctx.consoles += header + `(no fenced block found after write:)\n`;
                 ctx.execCount = 0;
-            } else if (ctx.dryRun) {
-                const n = blk.content.split('\n').length;
-                ctx.consoles += header + `[dry-run] would write ${n} line(s) to ${resolved}\n`;
-                i += blk.consumed; ctx.nowLine += blk.consumed; ctx.execCount = depth + 1;
             } else {
-                try {
-                    fs.mkdirSync(path.dirname(resolved), { recursive: true });
-                    fs.writeFileSync(resolved, blk.content + '\n', 'utf8');
-                    const n = blk.content.split('\n').length;
-                    ctx.consoles += header + `wrote ${n} line(s) to ${resolved}\n`;
-                    pushReport({ command: `write: ${filePath}`, rendered: `write: ${filePath}`, output: `wrote ${n} line(s)`, code: 0, ts: getDate(), ok: true, startMs: Date.now(), endMs: Date.now(), isParallel: false, parallelGroup: -1 });
+                // {VAR}/{$VAR} placeholders in the fenced body (e.g. values bound via
+                // a preceding `prompt:`) must be substituted before writing, same as
+                // every other directive's command text.
+                const rendered = substituteVars(blk.content, ctx.vars);
+                if (ctx.dryRun) {
+                    const n = rendered.split('\n').length;
+                    ctx.consoles += header + `[dry-run] would write ${n} line(s) to ${resolved}\n`;
                     i += blk.consumed; ctx.nowLine += blk.consumed; ctx.execCount = depth + 1;
-                } catch (err) {
-                    ctx.consoles += header + `error: ${String(err)}\n`;
-                    ctx.execCount = 0;
+                } else {
+                    try {
+                        fs.mkdirSync(path.dirname(resolved), { recursive: true });
+                        fs.writeFileSync(resolved, rendered + '\n', 'utf8');
+                        const n = rendered.split('\n').length;
+                        ctx.consoles += header + `wrote ${n} line(s) to ${resolved}\n`;
+                        pushReport({ command: `write: ${filePath}`, rendered: `write: ${filePath}`, output: `wrote ${n} line(s)`, code: 0, ts: getDate(), ok: true, startMs: Date.now(), endMs: Date.now(), isParallel: false, parallelGroup: -1 });
+                        i += blk.consumed; ctx.nowLine += blk.consumed; ctx.execCount = depth + 1;
+                    } catch (err) {
+                        ctx.consoles += header + `error: ${String(err)}\n`;
+                        ctx.execCount = 0;
+                    }
                 }
             }
             ctx.nowLine++;
             continue;
         }
 
-        const assertHit = parseAssert(line.replace(/^\t*- /, ''));
-        if (assertHit && line.match(/^\t*- /)) {
+        const assertBody = line.match(/^(\t*)- (.*)$/);
+        const assertHit = assertBody ? parseAssert(assertBody[2]) : null;
+        if (assertHit && assertBody) {
+            const depth = assertBody[1].length;
+            if (depth > ctx.execCount) {
+                ctx.execCount = 0;
+                ctx.nowLine++;
+                continue;
+            }
             const passed = evaluateAssert(assertHit, ctx);
             const header = `\n[ assert: ${describeAssert(assertHit)} ] ${getDate()}\n`;
             ctx.consoles += header + (passed ? '✓ pass\n' : '✗ FAIL\n');
             ctx.execFlag = true;
-            if (!passed) { ctx.assertionFailed = true; ctx.execCount = 0; }
+            ctx.execCount = passed ? depth + 1 : 0;
+            if (!passed) { ctx.assertionFailed = true; }
             ctx.progress.report({ message: `assert ${passed ? 'pass' : 'FAIL'}` });
             ctx.nowLine++;
             continue;
         }
 
-        const expectedDepthRe = new RegExp(regTab(ctx.execCount));
-        if (expectedDepthRe.test(line)) {
-            const { newIdx, extraNowLine } = await runOrParallel(line, ctx.execCount, lines, i, ctx);
-            i = newIdx; ctx.nowLine += extraNowLine;
-        } else {
-            ctx.execCount = 0;
-            const topRe = new RegExp(regTab(0));
-            if (topRe.test(line)) {
-                const { newIdx, extraNowLine } = await runOrParallel(line, 0, lines, i, ctx);
+        const listLineMatch = line.match(/^(\t*)- /);
+        if (listLineMatch) {
+            const curDepth = listLineMatch[1].length;
+            if (curDepth <= ctx.execCount) {
+                const { newIdx, extraNowLine } = await runOrParallel(line, curDepth, lines, i, ctx);
                 i = newIdx; ctx.nowLine += extraNowLine;
+            } else {
+                ctx.execCount = 0;
             }
         }
 

@@ -17,6 +17,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 const { spawn } = require("child_process");
 
 // We require the compiled output: the same parser the extension uses.
@@ -103,6 +104,32 @@ function spawnAsync(cmd) {
 }
 
 // ---------------------------------------------------------------------------
+// prompt: directive — CLI has no VS Code input box. Prefer an environment
+// variable named after the binding (handy for CI); fall back to an
+// interactive readline prompt when stdin is a TTY; otherwise fail loudly.
+// (Secret masking is not implemented in this fallback.)
+// ---------------------------------------------------------------------------
+function promptForValue(bindName, message, secret) {
+    return new Promise((resolve) => {
+        if (process.env[bindName] !== undefined) {
+            console.log(`[ prompt: {${bindName}} ] using value from environment variable ${bindName}`);
+            resolve(process.env[bindName]);
+            return;
+        }
+        if (!process.stdin.isTTY) {
+            console.error(`[ prompt: {${bindName}} ] no TTY and no ${bindName} env var set; cannot prompt in non-interactive mode`);
+            resolve(null);
+            return;
+        }
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question(`${message}${secret ? " (secret)" : ""} [{${bindName}}]: `, (answer) => {
+            rl.close();
+            resolve(answer);
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Recursive file runner
 // ---------------------------------------------------------------------------
 async function runFile(filePath, vars, entries, seenFiles) {
@@ -116,11 +143,18 @@ async function runFile(filePath, vars, entries, seenFiles) {
     const text = fs.readFileSync(resolved, "utf8");
     const lines = text.split(/\r\n|\r|\n/);
     const baseCwd = path.dirname(resolved);
+    // execCount is a *ceiling*: any list line whose indentation depth is <=
+    // execCount is reachable (this allows several sibling steps at the same
+    // depth to run one after another, not just a single child before you
+    // must go one level deeper). It advances to (depth + 1) after a
+    // successful step at that depth, and resets to 0 on failure.
     let execCount = 0;
     let failures = 0;
 
     for (let i = 0; i < lines.length; i++) {
-        const raw = lines[i];
+        const cont = ext.joinContinuedLines(lines, i);
+        const raw = ext.normalizeIndent(cont.joined);
+        if (cont.consumed > 1) { i += cont.consumed - 1; }
 
         if (ext.horizonCheck(raw)) { execCount = 0; continue; }
 
@@ -152,61 +186,84 @@ async function runFile(filePath, vars, entries, seenFiles) {
             continue;
         }
 
-        const expectRe = new RegExp(ext.regTab(execCount));
-        if (!expectRe.test(raw)) { execCount = 0; }
-        const depthRe = new RegExp(ext.regTab(execCount));
-        if (!depthRe.test(raw)) { continue; }
+        // prompt: {VAR} message  (checked pre-substitution, like extension.ts)
+        const promptDir = ext.parsePromptDirective(raw);
+        if (promptDir) {
+            const { depth, bindName, message, secret } = promptDir;
+            if (depth > execCount) { execCount = 0; continue; }
 
-        const body = raw.replace(depthRe, "");
-        const { body: noParallelBody, parallel } = ext.detectParallelFlag(body);
-
-        // Runbook include: - include: path/to/other.md
-        if (/^include:\s+/i.test(noParallelBody)) {
-            const includePath = noParallelBody.replace(/^include:\s+/i, "").trim();
-            const inclResolved = path.isAbsolute(includePath) ? includePath : path.join(baseCwd, includePath);
-            console.log(`\n[ include: ${inclResolved} ]`);
-            const subVars = { num: { ...vars.num }, named: { ...vars.named }, prev: vars.prev, status: vars.status };
-            const subFailures = await runFile(inclResolved, subVars, entries, seenFiles);
-            failures += subFailures;
-            Object.assign(vars.num, subVars.num);
-            Object.assign(vars.named, subVars.named);
-            vars.prev = subVars.prev;
-            vars.status = subVars.status;
-            execCount++;
-            continue;
-        }
-
-        // File open (VS Code only — skip in CLI)
-        if (/^open:\s+/i.test(noParallelBody)) {
-            console.log(`[open: ${noParallelBody.replace(/^open:\s+/i, "").trim()} — skipped in CLI mode]`);
-            execCount++;
-            continue;
-        }
-
-        // Terminal passthrough: run as a regular command in CLI (no active terminal)
-        if (/^!\s+/.test(noParallelBody)) {
-            const termCmd = noParallelBody.replace(/^!\s+/, "").trim();
-            const sub = ext.applyChangeWord(ext.substituteVars(termCmd, vars), cfg.changeWord);
-            const final = ext.applyTemplate(sub, cfg, profile);
-            console.log(`▶ [terminal] ${final}`);
             if (dryRun) {
-                console.log(`[dry-run] ${final}`);
-                execCount++;
+                console.log(`[ prompt: {${bindName}} ] [dry-run] would prompt: ${message}`);
+                execCount = depth + 1;
+                continue;
+            }
+            const val = await promptForValue(bindName, message, secret);
+            if (val === null) {
+                console.error(`[ prompt: {${bindName}} ] cancelled / unavailable`);
+                failures++;
+                execCount = 0;
             } else {
-                const r = await spawnAsync(final);
-                const code = r.status;
-                const outText = r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : "");
-                vars.prev = r.stdout || "";
-                vars.status = code;
-                entries.push({ command: final, output: outText, code, ts: new Date().toISOString(), ok: code === 0 });
-                if (code !== 0) { failures++; }
-                execCount = code === 0 ? execCount + 1 : 0;
+                vars.named[bindName] = val;
+                console.log(`[ prompt: {${bindName}} ] input received`);
+                execCount = depth + 1;
             }
             continue;
         }
 
-        // Assertion: - assert: ...
-        const assertHit = ext.parseAssert(noParallelBody);
+        // Substitute {VAR}/{$VAR} and changeWord mappings once, then reuse for
+        // everything else on this line (write:, assert:, include:, commands...).
+        const subLine = ext.applyChangeWord(ext.substituteVars(raw, vars), cfg.changeWord);
+
+        // write: path  +  fenced block on the following line(s)
+        const writeDir = ext.parseWriteDirective(subLine);
+        if (writeDir) {
+            const { depth, filePath: wPath } = writeDir;
+            if (depth > execCount) { execCount = 0; continue; }
+
+            const blk = ext.collectFencedBlock(lines, i + 1);
+            const wResolved = path.isAbsolute(wPath) ? wPath : path.join(baseCwd, wPath);
+            if (blk.content === null) {
+                console.error(`[ write: ${wPath} ] no fenced block found after write:`);
+                failures++;
+                execCount = 0;
+                continue;
+            }
+            // {VAR} placeholders in the written content (e.g. from a preceding
+            // prompt:) must be substituted with the *current* variables.
+            const rendered = ext.substituteVars(blk.content, vars);
+            const n = rendered.split("\n").length;
+            if (dryRun) {
+                console.log(`[ write: ${wPath} ] [dry-run] would write ${n} line(s) to ${wResolved}`);
+            } else {
+                try {
+                    fs.mkdirSync(path.dirname(wResolved), { recursive: true });
+                    fs.writeFileSync(wResolved, rendered + "\n", "utf8");
+                    console.log(`[ write: ${wPath} ] wrote ${n} line(s) to ${wResolved}`);
+                    entries.push({ command: `write: ${wPath}`, output: `wrote ${n} line(s) to ${wResolved}`, code: 0, ts: new Date().toISOString(), ok: true });
+                } catch (err) {
+                    console.error(`[ write: ${wPath} ] error: ${String(err)}`);
+                    failures++;
+                    execCount = 0;
+                    i += blk.consumed;
+                    continue;
+                }
+            }
+            i += blk.consumed;
+            execCount = depth + 1;
+            continue;
+        }
+
+        const listMatch = subLine.match(/^(\t*)- /);
+        if (!listMatch) { continue; }
+        const curDepth = listMatch[1].length;
+        if (curDepth > execCount) { execCount = 0; continue; }
+
+        const body = subLine.replace(/^\t*- /, "");
+        const { body: noRetryBody, retryCount, retryInterval } = ext.detectRetryFlag(body);
+        const { body: cleanBody, parallel } = ext.detectParallelFlag(noRetryBody);
+
+        // Assertion: - assert: ...  (depth already validated above)
+        const assertHit = ext.parseAssert(cleanBody);
         if (assertHit) {
             let ok;
             switch (assertHit.kind) {
@@ -216,21 +273,67 @@ async function runFile(filePath, vars, entries, seenFiles) {
                 case "regex":    ok = assertHit.arg.test(vars.prev); break;
             }
             const tag = ok ? "✓ assert" : "✗ ASSERT FAILED";
-            console.log(`${tag}: ${noParallelBody}`);
-            if (!ok) { failures++; execCount = 0; }
+            console.log(`${tag}: ${cleanBody}`);
+            if (!ok) { failures++; execCount = 0; } else { execCount = curDepth + 1; }
+            continue;
+        }
+
+        // Runbook include: - include: path/to/other.md
+        if (/^include:\s+/i.test(cleanBody)) {
+            const includePath = cleanBody.replace(/^include:\s+/i, "").trim();
+            const inclResolved = path.isAbsolute(includePath) ? includePath : path.join(baseCwd, includePath);
+            console.log(`\n[ include: ${inclResolved} ]`);
+            const subVars = { num: { ...vars.num }, named: { ...vars.named }, prev: vars.prev, status: vars.status };
+            const subFailures = await runFile(inclResolved, subVars, entries, seenFiles);
+            failures += subFailures;
+            Object.assign(vars.num, subVars.num);
+            Object.assign(vars.named, subVars.named);
+            vars.prev = subVars.prev;
+            vars.status = subVars.status;
+            execCount = curDepth + 1;
+            continue;
+        }
+
+        // File open (VS Code only — skip in CLI)
+        if (/^open:\s+/i.test(cleanBody)) {
+            console.log(`[open: ${cleanBody.replace(/^open:\s+/i, "").trim()} — skipped in CLI mode]`);
+            execCount = curDepth + 1;
+            continue;
+        }
+
+        // Terminal passthrough: run as a regular command in CLI (no active terminal)
+        if (/^!\s+/.test(cleanBody)) {
+            const termCmd = cleanBody.replace(/^!\s+/, "").trim();
+            const final = ext.applyTemplate(termCmd, cfg, profile);
+            console.log(`▶ [terminal] ${final}`);
+            if (dryRun) {
+                console.log(`[dry-run] ${final}`);
+                execCount = curDepth + 1;
+            } else {
+                const r = await spawnAsync(final);
+                const code = r.status;
+                const outText = r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : "");
+                vars.prev = r.stdout || "";
+                vars.status = code;
+                entries.push({ command: final, output: outText, code, ts: new Date().toISOString(), ok: code === 0 });
+                if (code !== 0) { failures++; }
+                execCount = code === 0 ? curDepth + 1 : 0;
+            }
             continue;
         }
 
         // Parallel group: - [parallel] cmd
         if (parallel) {
-            const depth = execCount;
-            const parallelItems = [noParallelBody];
+            const depthRe = new RegExp(ext.regTab(curDepth));
+            const parallelItems = [cleanBody];
 
             let j = i + 1;
             while (j < lines.length) {
-                if (!depthRe.test(lines[j])) { break; }
-                const nextRawBody = lines[j].replace(depthRe, "");
-                const { body: nextBody, parallel: nextParallel } = ext.detectParallelFlag(nextRawBody);
+                const nextRaw = ext.normalizeIndent(lines[j]);
+                if (!depthRe.test(nextRaw)) { break; }
+                const nextRawBody = nextRaw.replace(depthRe, "");
+                const { body: nextNoRetryBody } = ext.detectRetryFlag(nextRawBody);
+                const { body: nextBody, parallel: nextParallel } = ext.detectParallelFlag(nextNoRetryBody);
                 if (!nextParallel) { break; }
                 parallelItems.push(nextBody);
                 j++;
@@ -242,7 +345,7 @@ async function runFile(filePath, vars, entries, seenFiles) {
                     const final = ext.applyTemplate(ext.applyChangeWord(ext.substituteVars(pb, vars), cfg.changeWord), cfg, profile);
                     console.log(`▶ [parallel][dry-run] ${final}`);
                 }
-                execCount = depth + 1;
+                execCount = curDepth + 1;
                 continue;
             }
 
@@ -262,21 +365,30 @@ async function runFile(filePath, vars, entries, seenFiles) {
             if (!allOk) { failures += results.filter(r => r.code !== 0).length; }
             vars.prev = results[results.length - 1]?.stdout || "";
             vars.status = results[results.length - 1]?.code ?? 0;
-            execCount = allOk ? depth + 1 : 0;
+            execCount = allOk ? curDepth + 1 : 0;
             continue;
         }
 
-        // Regular command
-        const sub = ext.applyChangeWord(ext.substituteVars(noParallelBody, vars), cfg.changeWord);
-        const final = ext.applyTemplate(sub, cfg, profile);
-        console.log(`▶ ${final}`);
+        // Regular command, with optional [retry: N, Ns] support
+        const final = ext.applyTemplate(cleanBody, cfg, profile);
+        console.log(`▶ ${final}${retryCount > 0 ? ` [retry up to ${retryCount}x every ${retryInterval}ms]` : ""}`);
         let outText = "";
         let code = 0;
         if (dryRun) {
             outText = `[dry-run] ${final}`;
             console.log(outText);
         } else {
-            const r = await spawnAsync(final);
+            const maxAttempts = retryCount > 0 ? retryCount + 1 : 1;
+            let attempts = 0;
+            let r;
+            do {
+                if (attempts > 0) {
+                    console.log(`[retry ${attempts}/${retryCount}] waiting ${retryInterval}ms...`);
+                    await new Promise((res) => setTimeout(res, retryInterval));
+                }
+                r = await spawnAsync(final);
+                attempts++;
+            } while (r.status !== 0 && attempts < maxAttempts);
             outText = r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : "");
             code = r.status;
             vars.prev = r.stdout || "";
@@ -284,7 +396,7 @@ async function runFile(filePath, vars, entries, seenFiles) {
             if (code !== 0) { failures++; }
         }
         entries.push({ command: final, output: outText, code, ts: new Date().toISOString(), ok: code === 0 });
-        execCount = (code === 0 || dryRun) ? execCount + 1 : 0;
+        execCount = (code === 0 || dryRun) ? curDepth + 1 : 0;
     }
 
     seenFiles.delete(resolved);

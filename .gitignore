@@ -1,4 +1,5 @@
-out
-node_modules
-.vscode-test/
-*.vsix
+# すべての.mdファイルを無視
+*.md
+
+# README.md のみ例外として追跡対象にする
+!README.md
