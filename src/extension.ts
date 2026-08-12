@@ -1327,7 +1327,12 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
             }
         }
 
-        if (isFenceLine(line)) {
+        // Bare ``` fences are treated as markers for a pre-existing output block so a
+        // re-run can overwrite it in place. That only makes sense once a command has
+        // actually executed in this pass — otherwise an unrelated bare fence earlier in
+        // the document (e.g. an ASCII-art diagram) would be mistaken for one and the
+        // whole run would silently stop before reaching any real command.
+        if (ctx.execFlag && isFenceLine(line)) {
             if (ctx.startLine === 0) {
                 ctx.startLine = ctx.nowLine;
             } else {

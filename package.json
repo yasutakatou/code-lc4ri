@@ -2,7 +2,7 @@
     "name": "code-lc4ri",
     "displayName": "code-lc4ri",
     "description": "LC4RI for VS Code — Markdown driven reproducible operations",
-    "version": "1.5.8",
+    "version": "1.5.9",
     "publisher": "yasutakatou",
     "repository": "https://github.com/yasutakatou/code-lc4ri",
     "engines": {
@@ -63,6 +63,26 @@
             {
                 "command": "extension.lc4ri.exportReportHtml",
                 "title": "code-lc4ri: Export execution report (HTML)"
+            },
+            {
+                "command": "extension.lc4ri.showVarInspector",
+                "title": "code-lc4ri: Show Variable Inspector"
+            },
+            {
+                "command": "extension.lc4ri.showHistory",
+                "title": "code-lc4ri: Show Execution History"
+            },
+            {
+                "command": "extension.lc4ri.clearHistory",
+                "title": "code-lc4ri: Clear Execution History"
+            },
+            {
+                "command": "extension.lc4ri.searchOutput",
+                "title": "code-lc4ri: Search Output Block"
+            },
+            {
+                "command": "extension.lc4ri.showTimeline",
+                "title": "code-lc4ri: Show Execution Timeline"
             }
         ],
         "configuration": {

@@ -75,6 +75,19 @@ const cfg = {
 };
 
 // ---------------------------------------------------------------------------
+// Random filename generator for auto-write blocks (```yaml / ```conf / ```json
+// with no explicit path) — mirrors extension.ts's generateRandomAlpha().
+// ---------------------------------------------------------------------------
+function randomAlpha(length) {
+    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let result = "";
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Async spawn helper (streaming stdout to console, returns full output)
 // ---------------------------------------------------------------------------
 function spawnAsync(cmd) {
@@ -170,6 +183,75 @@ async function runFile(filePath, vars, entries, seenFiles) {
             } catch (_) {
                 console.error(`[lc4ri] env file not found: ${envResolved}`);
             }
+            continue;
+        }
+
+        // Fenced block auto-exec: ```bash / ```zsh / ```sh / ```yaml / ```conf / ```json
+        // (mirrors extension.ts's fenceExecMatch — v1.3 "Code Block Execution and Auto-Write")
+        const fenceMatch = raw.match(/^([ \t]*)(`{3,}|~{3,})\s*(bash|zsh|sh|yaml|conf|json)\b(?:\s+(.+))?\s*$/i);
+        if (fenceMatch) {
+            let fenceDepth = 0;
+            for (const c of fenceMatch[1]) { if (c === "\t") { fenceDepth++; } }
+            if (fenceDepth > execCount) { execCount = 0; continue; }
+
+            const lang = fenceMatch[3].toLowerCase();
+            const argPath = fenceMatch[4] ? fenceMatch[4].trim() : "";
+            const blk = ext.collectFencedBlock(lines, i);
+            if (blk.content === null) { continue; }
+
+            if (["yaml", "conf", "json"].includes(lang)) {
+                const isRandom = !argPath;
+                const extName = lang === "conf" ? "conf" : lang;
+                const filename = argPath || `${randomAlpha(8)}.${extName}`;
+                const resolved = path.isAbsolute(filename) ? filename : path.join(baseCwd, filename);
+                const rendered = ext.substituteVars(blk.content, vars);
+                const n = rendered.split("\n").length;
+                const tag = isRandom ? " (auto-generated)" : "";
+                if (dryRun) {
+                    console.log(`[ write: ${filename}${tag} ] [dry-run] would write ${n} line(s) to ${resolved}`);
+                } else {
+                    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+                    fs.writeFileSync(resolved, rendered + "\n", "utf8");
+                    console.log(`[ write: ${filename}${tag} ] wrote ${n} line(s) to ${resolved}`);
+                    entries.push({ command: `write: ${filename}`, output: `wrote ${n} line(s) to ${resolved}`, code: 0, ts: new Date().toISOString(), ok: true });
+                }
+                execCount = fenceDepth + 1;
+            } else {
+                const blockLines = blk.content.split(/\r?\n/);
+                const logicalCommands = [];
+                for (let b = 0; b < blockLines.length; b++) {
+                    let cmd = blockLines[b];
+                    while (/\\\s*$/.test(cmd) && b + 1 < blockLines.length) {
+                        cmd = cmd.replace(/\\\s*$/, "") + blockLines[b + 1];
+                        b++;
+                    }
+                    const trimmed = cmd.trim();
+                    if (trimmed.length > 0 && !trimmed.startsWith("#")) { logicalCommands.push(trimmed); }
+                }
+
+                execCount = fenceDepth + 1;
+                for (const rawCmd of logicalCommands) {
+                    const sub = ext.applyChangeWord(ext.substituteVars(rawCmd, vars), cfg.changeWord);
+                    const final = ext.applyTemplate(sub, cfg, profile);
+                    console.log(`▶ ${final}`);
+                    if (dryRun) {
+                        console.log(`[dry-run] ${final}`);
+                        continue;
+                    }
+                    const r = await spawnAsync(final);
+                    const code = r.status;
+                    const outText = r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : "");
+                    vars.prev = r.stdout || "";
+                    vars.status = code;
+                    entries.push({ command: final, output: outText, code, ts: new Date().toISOString(), ok: code === 0 });
+                    if (code !== 0) {
+                        failures++;
+                        execCount = 0;
+                        break;
+                    }
+                }
+            }
+            i += blk.consumed - 1;
             continue;
         }
 

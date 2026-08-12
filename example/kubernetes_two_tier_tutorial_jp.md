@@ -64,7 +64,6 @@ kubectl get nodes
 mkdir -p ./k8s-tutorial
 cd ./k8s-tutorial
 ```
-```
 
 
 
@@ -412,8 +411,6 @@ kubectl apply -f 00-namespace.yaml
 ```
 
 
-
-```
 
 ```bash
 kubectl get namespace tutorial

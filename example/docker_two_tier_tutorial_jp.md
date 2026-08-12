@@ -305,7 +305,7 @@ Web サーバー（Nginx コンテナ）の中から DB へ接続できること
 
 ```bash
 docker exec -it tutorial-web bash -c \
-  "apt-get install -y -q default-mysql-client 2>/dev/null; \
+  "apt-get update -q 2>/dev/null && apt-get install -y -q default-mysql-client 2>/dev/null; \
    mysql -h tutorial-db -u webuser -pwebpass tutorialdb \
    -e 'SELECT body, created_at FROM messages ORDER BY id;'"
 ```
