@@ -410,6 +410,7 @@ Exit code is non-zero if any command failed or any `assert:` failed, so it slots
 | `lc4ri.denyList` | `[]` | Matching commands never run |
 | `lc4ri.confirmDangerous` | `true` | Show a modal for dangerous matches |
 | `lc4ri.showCodeLens` | `true` | Show ▶ Run / Dry-run on list lines |
+| `lc4ri.followOutput` | `true` | Scroll to the output block while it grows (v1.6.0-) |
 | `lc4ri.shell` | `null` | Shell binary (null = system default) |
 
 Default dangerous patterns: `rm -rf /`, `dd if=`, `mkfs.`, `shutdown`, `reboot`, fork bombs, `curl|sh`, `wget|sh`, `> /dev/sd*`.
@@ -1108,6 +1109,72 @@ v1.5.7 fixes this by resetting `currentCwd` to the runbook file's directory at t
 | Terminal killed while `cd` was in progress | Tracked cwd may not match actual terminal cwd | cwd reset to runbook directory on next run |
 
 No settings or document changes are required.
+
+---
+
+# v1.6.0: Never run silently — status bar, warnings, and scroll follow
+
+Feedback from the TUI/CLI version applies to the VS Code extension too: **when a run did nothing, the extension said nothing**. v1.6.0 makes the current state visible at all times and keeps the editor scrolled to where the action is.
+
+## 1. Status bar shows the run state, not just the profile
+
+The status bar item used to show only the active profile (`lc4ri: (none)`). It now reports what the extension is doing right now, and it is still clickable to switch the profile.
+
+| State | Status bar | Meaning |
+|---|---|---|
+| Idle | `$(circle-outline) lc4ri: idle` | Waiting. Hover for a reminder of how to run. |
+| Running | `$(sync~spin) lc4ri: running — kubectl get pods` | The command currently executing (truncated to 40 chars) |
+| Running (dry-run) | `$(sync~spin) lc4ri: running (dry-run) — ls` | Dry-run mode is clearly labelled |
+| Success | `$(check) lc4ri: ok (3)` | The last run finished; 3 commands succeeded |
+| Failure | `$(error) lc4ri: FAIL (1/3)` | **Highlighted red.** 1 of 3 commands failed (assertion failures count too) |
+| Nothing to run | `$(warning) lc4ri: nothing to run` | **Highlighted yellow.** See section 2 |
+| Cancelled | `$(circle-slash) lc4ri: cancelled` | The run was cancelled |
+
+- The active profile is appended in brackets, e.g. `$(check) lc4ri: ok (3) [prod-ssh]`.
+- The tooltip always shows the profile, a one-line explanation of the state, and `Click to switch execution profile.`
+- A finished state stays on the bar for 15 seconds and then falls back to `idle`, so the red/yellow highlight never sticks forever.
+
+## 2. "Nothing ran" is now reported explicitly
+
+Previously, if the cursor was on a line the runner does not recognise, the run ended without a message, without touching the document, and without any log — indistinguishable from a broken extension.
+
+Now, whenever a run finishes without executing anything, a warning is shown (and written to the `code-lc4ri` output channel), tailored to the reason:
+
+| Situation | Message |
+|---|---|
+| Cursor on prose / a heading | `code-lc4ri: nothing ran from line 5. The nearest runnable line is line 10.` — with a **`Go to line 10`** button that jumps there |
+| Cursor on an **indented** list line | `code-lc4ri: nothing ran from line 8. That line is indented, so it only runs as part of an AND-chain — put the cursor on the top-level "- " line above it.` |
+| The line is runnable but produced nothing | `code-lc4ri: nothing ran from line 4. The line looks runnable, so it was most likely blocked — check the "code-lc4ri" output channel.` (deny-list / allow-list / cancelled confirmation) |
+| The document has no runnable line at all | `code-lc4ri: nothing ran from line 1. Write a command as a list item ("- ls") or as a fenced block ("\`\`\`bash").` |
+
+A line counts as runnable when it is a list item (`- ls`), a numbered assignment (`1. hostname`), or a language-tagged fence (```` ```bash ````, `sh`, `zsh`, `yaml`, `conf`, `json`). **Space indentation is recognised as well as tab indentation**, matching what the runner actually executes.
+
+## 3. The editor follows the output
+
+- **While running:** every time the output block is rewritten (each 200 ms streaming update), the editor scrolls to the tail of the block, so long output no longer runs off-screen.
+- **When the run ends:** the cursor is moved to the first line *after* the output block. Pressing the run shortcut again immediately continues with the next step — no manual scrolling, no re-positioning the cursor.
+- `▶ Run` / `Dry-run` CodeLens actions also scroll the target line into view before running.
+
+Set `lc4ri.followOutput` to `false` to keep the previous, non-scrolling behaviour.
+
+```json
+{
+  "lc4ri.followOutput": true
+}
+```
+
+## 4. Developer-side changes
+
+New exported helpers, all pure and covered by `npm test`:
+
+| Function | Purpose |
+|---|---|
+| `isRunnableLine(line)` | Whether the runner can execute a line (indent-normalised) |
+| `findNextRunnableLine(lines, fromIdx)` | Index of the nearest runnable line, or `null` |
+| `buildNoRunnableMessage(cursorLine, cursorText, nextRunnable)` | The warning text for section 2 |
+| `computePostRunCursorLine(endLine, lineCount)` | Where the cursor lands after a run |
+| `buildStatusBarView(state, detail)` | Status bar text / tooltip / highlight for a state |
+| `truncateForStatusBar(s, max)` | Command shortening used by the status bar |
 
 ---
 

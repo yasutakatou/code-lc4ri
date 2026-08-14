@@ -89,7 +89,7 @@ const cfg = {
     profiles: { ssh: 'ssh host {COMMAND}' },
     changeWord: {}, toutf8: false, toterminal: false, outputFormat: 'codeblock',
     dangerousPatterns: [], allowList: [], denyList: [], confirmDangerous: false,
-    showCodeLens: true, shell: null
+    showCodeLens: true, followOutput: true, shell: null
 };
 eq('with profile', ext.applyTemplate('ls', cfg, 'ssh'), 'ssh host ls');
 eq('empty profile', ext.applyTemplate('ls', { ...cfg, template: {} }, ''), 'ls');
@@ -286,6 +286,111 @@ truthy('snap: status OK badge', snap.includes('badge-ok') && snap.includes('OK')
 truthy('snap: cwd rendered', snap.includes('/tmp'));
 truthy('snap: env MY_ENV rendered', snap.includes('MY_ENV') && snap.includes('val'));
 truthy('snap: ts rendered (not —)', !snap.includes('<span class="ts" id="ts">—</span>'));
+console.log('isRunnableLine');
+truthy('list item', ext.isRunnableLine('- ls'));
+truthy('tab-indented list', ext.isRunnableLine('\t- rm foo'));
+truthy('2-space indented list', ext.isRunnableLine('  - rm foo'));
+truthy('4-space indented list', ext.isRunnableLine('    - rm foo'));
+truthy('extra space after dash', ext.isRunnableLine('-   ls'));
+truthy('directive line', ext.isRunnableLine('- write: out.txt'));
+truthy('numbered assignment', ext.isRunnableLine('1. hostname'));
+truthy('bash fence', ext.isRunnableLine('```bash'));
+truthy('sh fence upper', ext.isRunnableLine('```SH'));
+truthy('yaml fence', ext.isRunnableLine('```yaml manifest.yaml'));
+truthy('indented bash fence', ext.isRunnableLine('  ```bash'));
+truthy('tilde fence', ext.isRunnableLine('~~~bash'));
+truthy('bare fence is NOT', !ext.isRunnableLine('```'));
+truthy('python fence is NOT', !ext.isRunnableLine('```python'));
+truthy('prose is NOT', !ext.isRunnableLine('run the command below'));
+truthy('heading is NOT', !ext.isRunnableLine('# Step 1'));
+truthy('horizon --- is NOT', !ext.isRunnableLine('---'));
+truthy('horizon - - - is NOT', !ext.isRunnableLine('- - -'));
+truthy('empty dash is NOT', !ext.isRunnableLine('- '));
+truthy('blank line is NOT', !ext.isRunnableLine(''));
+truthy('0. is NOT numbered', !ext.isRunnableLine('0. ls'));
+console.log('findNextRunnableLine');
+{
+    const doc = ['# Title', '', 'some prose', '- ls', '', '```bash', 'uname', '```'];
+    eq('finds first from 0', ext.findNextRunnableLine(doc, 0), 3);
+    eq('finds fence after list', ext.findNextRunnableLine(doc, 4), 5);
+    eq('negative from clamps', ext.findNextRunnableLine(doc, -5), 3);
+    eq('none after last', ext.findNextRunnableLine(doc, 6), null);
+    eq('no runnable at all', ext.findNextRunnableLine(['# a', 'text'], 0), null);
+    eq('empty document', ext.findNextRunnableLine([], 0), null);
+}
+console.log('buildNoRunnableMessage');
+{
+    const prose = ext.buildNoRunnableMessage(4, 'just prose', 9);
+    truthy('prose: 1-based cursor line', prose.includes('line 5'));
+    truthy('prose: points at nearest', prose.includes('line 10'));
+    const alone = ext.buildNoRunnableMessage(0, 'just prose', null);
+    truthy('no target: how-to hint', alone.includes('- ls') && alone.includes('```bash'));
+    truthy('no target: no line pointer', !alone.includes('nearest'));
+    const indented = ext.buildNoRunnableMessage(7, '\t- rm foo', 2);
+    truthy('indented: AND-chain hint', indented.includes('AND-chain'));
+    truthy('indented: says top-level', indented.includes('top-level'));
+    const spaceIndented = ext.buildNoRunnableMessage(7, '  - rm foo', 2);
+    truthy('space indent = same hint', spaceIndented.includes('AND-chain'));
+    const blocked = ext.buildNoRunnableMessage(3, '- rm -rf /', null);
+    truthy('runnable line: blocked hint', blocked.includes('output channel'));
+    truthy('runnable line: no AND hint', !blocked.includes('AND-chain'));
+    truthy('always prefixed', prose.startsWith('code-lc4ri:') && alone.startsWith('code-lc4ri:'));
+}
+console.log('computePostRunCursorLine');
+eq('inside document', ext.computePostRunCursorLine(10, 40), 10);
+eq('clamps to last line', ext.computePostRunCursorLine(99, 40), 39);
+eq('never negative', ext.computePostRunCursorLine(-3, 40), 0);
+eq('empty document', ext.computePostRunCursorLine(5, 0), 0);
+eq('single-line doc', ext.computePostRunCursorLine(5, 1), 0);
+console.log('truncateForStatusBar');
+eq('short passes through', ext.truncateForStatusBar('ls -la'), 'ls -la');
+eq('collapses whitespace', ext.truncateForStatusBar('  ls   -la \n'), 'ls -la');
+eq('truncates with ellipsis', ext.truncateForStatusBar('abcdefghij', 5), 'abcd…');
+truthy('respects max length', ext.truncateForStatusBar('x'.repeat(200)).length === 40);
+console.log('buildStatusBarView');
+{
+    const idle = ext.buildStatusBarView('idle');
+    truthy('idle: text', idle.text.includes('idle'));
+    truthy('idle: no highlight', idle.background === 'none');
+    truthy('idle: tooltip hint', idle.tooltip.includes('- command'));
+    const idleProf = ext.buildStatusBarView('idle', { profile: 'ssh' });
+    truthy('profile in text', idleProf.text.includes('[ssh]'));
+    truthy('profile in tooltip', idleProf.tooltip.includes('Profile: ssh'));
+    truthy('no profile => none', ext.buildStatusBarView('idle').tooltip.includes('Profile: (none)'));
+    const running = ext.buildStatusBarView('running', { message: 'kubectl get pods' });
+    truthy('running: spinner', running.text.includes('$(sync~spin)'));
+    truthy('running: command', running.text.includes('kubectl get pods'));
+    truthy('running: no highlight', running.background === 'none');
+    const longCmd = ext.buildStatusBarView('running', { message: 'echo ' + 'y'.repeat(200) });
+    truthy('running: command truncated', longCmd.text.includes('…') && longCmd.text.length < 90);
+    truthy('running: tooltip keeps full', longCmd.tooltip.includes('y'.repeat(200)));
+    const dry = ext.buildStatusBarView('running', { message: 'ls', dryRun: true });
+    truthy('dry-run marked', dry.text.includes('(dry-run)'));
+    const ok = ext.buildStatusBarView('ok', { okCount: 3 });
+    truthy('ok: check icon', ok.text.includes('$(check)'));
+    truthy('ok: count', ok.text.includes('(3)'));
+    truthy('ok: no highlight', ok.background === 'none');
+    const fail = ext.buildStatusBarView('fail', { okCount: 2, failCount: 1 });
+    truthy('fail: error icon', fail.text.includes('$(error)'));
+    truthy('fail: fail/total', fail.text.includes('(1/3)'));
+    truthy('fail: red highlight', fail.background === 'error');
+    truthy('fail: points at log', fail.tooltip.includes('output channel'));
+    // A failed assertion fails the run without failing a command — no "(0/0)"
+    const assertFail = ext.buildStatusBarView('fail', { okCount: 0, failCount: 0 });
+    truthy('fail without counts', assertFail.text.includes('FAIL') && !assertFail.text.includes('(0/0)'));
+    truthy('fail without counts stays red', assertFail.background === 'error');
+    const none = ext.buildStatusBarView('noTarget');
+    truthy('noTarget: warn icon', none.text.includes('$(warning)'));
+    truthy('noTarget: wording', none.text.includes('nothing to run'));
+    truthy('noTarget: yellow', none.background === 'warning');
+    truthy('noTarget: tooltip hint', none.tooltip.includes('no executable line'));
+    const cancelled = ext.buildStatusBarView('cancelled');
+    truthy('cancelled: wording', cancelled.text.includes('cancelled'));
+    truthy('cancelled: no highlight', cancelled.background === 'none');
+    const states = ['idle', 'running', 'ok', 'fail', 'noTarget', 'cancelled'];
+    truthy('every state is labelled lc4ri', states.every(s => ext.buildStatusBarView(s).text.includes('lc4ri:')));
+    truthy('every tooltip offers profile switch', states.every(s => ext.buildStatusBarView(s).tooltip.includes('Click to switch execution profile.')));
+}
 console.log(`\n${passed} passed / ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
 //# sourceMappingURL=runUnit.js.map

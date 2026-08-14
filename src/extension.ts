@@ -27,6 +27,7 @@ export interface LC4RIConfig {
     denyList: string[];
     confirmDangerous: boolean;
     showCodeLens: boolean;
+    followOutput: boolean;               // scroll the editor to the growing output block
     shell: string | null;                // 'powershell' | 'cmd' | 'bash' | null (auto)
     toutf8?: boolean;
     toterminal?: boolean;
@@ -80,6 +81,11 @@ interface HistorySession {
 let outputChannel: vscode.OutputChannel | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 let activeProfile: string = '';
+// Status bar run state — so a run that does nothing is never silent
+let runState: Lc4riRunState = 'idle';
+let runStateDetail: StatusBarDetail = {};
+let runStateGeneration = 0;
+let runStateResetTimer: ReturnType<typeof setTimeout> | undefined;
 const reportEntries: ReportEntry[] = [];
 let codeLensEmitter: vscode.EventEmitter<void> | undefined;
 let currentCwd: string | undefined = undefined;
@@ -139,6 +145,7 @@ const DEFAULT_CONFIG: LC4RIConfig = {
     denyList: [],
     confirmDangerous: true,
     showCodeLens: true,
+    followOutput: true,
     shell: null,
 };
 
@@ -152,8 +159,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.command = 'extension.lc4ri.switchProfile';
-    statusBarItem.tooltip = 'code-lc4ri: switch execution profile';
-    updateStatusBar();
+    updateStatusBar();   // sets text + tooltip from the current run state
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
@@ -204,6 +210,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
     cancelAll();
+    if (runStateResetTimer !== undefined) { clearTimeout(runStateResetTimer); runStateResetTimer = undefined; }
+    runState = 'idle';
+    runStateDetail = {};
     outputChannel?.dispose();
     statusBarItem?.dispose();
     codeLensEmitter?.dispose();
@@ -231,6 +240,7 @@ export function readConfig(): LC4RIConfig {
         denyList:          ws.get<string[]>('denyList',        legacy.denyList           ?? DEFAULT_CONFIG.denyList),
         confirmDangerous:  ws.get<boolean>('confirmDangerous', legacy.confirmDangerous   ?? DEFAULT_CONFIG.confirmDangerous),
         showCodeLens:      ws.get<boolean>('showCodeLens',     legacy.showCodeLens       ?? DEFAULT_CONFIG.showCodeLens),
+        followOutput:      ws.get<boolean>('followOutput',     legacy.followOutput       ?? DEFAULT_CONFIG.followOutput),
         shell:             ws.get<string | null>('shell',      DEFAULT_CONFIG.shell),
     };
     return merged;
@@ -424,6 +434,58 @@ export function detectRetryFlag(body: string): { body: string; retryCount: numbe
     return { body: body.slice(m[0].length), retryCount: parseInt(m[1], 10), retryInterval: interval };
 }
 
+// -----------------------------------------------------------------------------
+// Runnable-line detection — used to explain "nothing happened" to the user
+// -----------------------------------------------------------------------------
+
+/**
+ * True when the runner can execute `line`: a list item, a numbered assignment,
+ * or a language-tagged fence.  The indent style is normalized first, so a
+ * space-indented list is recognized exactly like a tab-indented one.
+ */
+export function isRunnableLine(line: string): boolean {
+    const norm = normalizeIndent(line);
+    if (horizonCheck(norm)) { return false; }
+    if (/^\t*- \s*\S/.test(norm)) { return true; }
+    if (/^[1-9]\.\s+\S/.test(norm)) { return true; }
+    return /^[ \t]*(`{3,}|~{3,})\s*(bash|zsh|sh|yaml|conf|json)\b/i.test(norm);
+}
+
+/** Index of the first runnable line at or after `fromIdx`, or null when there is none. */
+export function findNextRunnableLine(lines: string[], fromIdx: number): number | null {
+    for (let i = Math.max(0, fromIdx); i < lines.length; i++) {
+        if (isRunnableLine(lines[i])) { return i; }
+    }
+    return null;
+}
+
+/**
+ * Message shown when a run finished without executing anything — the runner
+ * must never fail silently.  Line indexes are 0-based; the text is 1-based.
+ */
+export function buildNoRunnableMessage(cursorLine: number, cursorText: string, nextRunnable: number | null): string {
+    const head = `code-lc4ri: nothing ran from line ${cursorLine + 1}.`;
+    if (isRunnableLine(cursorText)) {
+        if (/^\t+- /.test(normalizeIndent(cursorText))) {
+            return `${head} That line is indented, so it only runs as part of an AND-chain — put the cursor on the top-level "- " line above it.`;
+        }
+        return `${head} The line looks runnable, so it was most likely blocked — check the "code-lc4ri" output channel.`;
+    }
+    if (nextRunnable !== null) {
+        return `${head} The nearest runnable line is line ${nextRunnable + 1}.`;
+    }
+    return `${head} Write a command as a list item ("- ls") or as a fenced block ("\`\`\`bash").`;
+}
+
+/**
+ * Line the cursor should land on once a run has written its output block: the
+ * first line after the block, clamped to the document.
+ */
+export function computePostRunCursorLine(outputBlockEndLine: number, lineCount: number): number {
+    if (lineCount <= 0) { return 0; }
+    return Math.max(0, Math.min(outputBlockEndLine, lineCount - 1));
+}
+
 export function substituteVars(line: string, vars: Variables): string {
     return line.replace(/\{([^{}\s]+)\}/g, (whole, key: string) => {
         if (key.startsWith('$')) {
@@ -522,6 +584,7 @@ async function confirmDangerous(cmd: string, pattern: string): Promise<boolean> 
 function cancelAll(): void {
     vscode.window.activeTerminal?.sendText('\x03', false);
     outputChannel?.appendLine('[lc4ri] all running commands cancelled');
+    setRunState('cancelled');
 }
 
 // =============================================================================
@@ -943,6 +1006,7 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
     const cfg = readConfig();
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
+        setRunState('noTarget');
         vscode.window.showWarningMessage('code-lc4ri: no active editor.');
         return;
     }
@@ -978,6 +1042,9 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
     // ④ Reset parallel group counter for this run
     parallelGroupCounter = 0;
 
+    setRunState('running', { message: 'starting…', dryRun: opts.dryRun });
+    let ranCtx: RunContext | undefined;
+
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: opts.dryRun ? 'code-lc4ri (dry-run)' : 'code-lc4ri',
@@ -1005,6 +1072,7 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
             nowLine: position.line,
             assertionFailed: false
         };
+        ranCtx = ctx;
 
         const syncInterval = setInterval(async () => {
             if (!editor || !doc || ctx.isSyncing) return;
@@ -1020,11 +1088,16 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
         if (ctx.execFlag) {
             while (ctx.isSyncing) { await new Promise(r => setTimeout(r, 50)); }
             await syncOutput(editor, doc, ctx);
+            // ③ Leave the cursor just past the output so the next step is ready to run
+            followOutputCursor(editor, ctx);
         }
 
         // ① Notify variable inspector of updates
         refreshVarInspector(ctx.vars);
     });
+
+    // Report the outcome — a run that executed nothing must say so out loud
+    reportRunOutcome(editor, position.line, ranCtx);
 
     // ② Finalize and save session
     if (currentSession) {
@@ -1039,6 +1112,72 @@ async function runFromCursor(opts: RunOptions): Promise<void> {
         if (historyPanel) { postHistoryData(); }
         currentSession = undefined;
     }
+}
+
+/**
+ * Turn the finished run into a status-bar state and, when nothing at all was
+ * executed, an explicit warning that points at the nearest runnable line.
+ * Must be called before the session is finalized (it reads `currentSession`).
+ */
+function reportRunOutcome(editor: vscode.TextEditor, cursorLine: number, ctx: RunContext | undefined): void {
+    const okCount = currentSession?.entries.filter(e => e.ok).length ?? 0;
+    const failCount = currentSession?.entries.filter(e => !e.ok).length ?? 0;
+    const dryRun = ctx?.dryRun === true;
+
+    if (ctx?.token.isCancellationRequested) {
+        setRunState('cancelled', { okCount, failCount, dryRun });
+        return;
+    }
+
+    if (ctx?.execFlag) {
+        const failed = failCount > 0 || ctx.assertionFailed;
+        setRunState(failed ? 'fail' : 'ok', { okCount, failCount, dryRun });
+        return;
+    }
+
+    // Nothing ran: never leave the user staring at an unchanged document.
+    setRunState('noTarget', { dryRun });
+
+    const doc = editor.document;
+    const cursorText = cursorLine < doc.lineCount ? doc.lineAt(cursorLine).text : '';
+    const allLines: string[] = [];
+    for (let i = 0; i < doc.lineCount; i++) { allLines.push(doc.lineAt(i).text); }
+
+    let next = findNextRunnableLine(allLines, cursorLine + 1);
+    if (next === null) { next = findNextRunnableLine(allLines, 0); }
+
+    const message = buildNoRunnableMessage(cursorLine, cursorText, next);
+    outputChannel?.appendLine(`[lc4ri] ${message}`);
+
+    const actions = next !== null ? [`Go to line ${next + 1}`] : [];
+    const target = next;
+    void vscode.window.showWarningMessage(message, ...actions).then(pick => {
+        if (pick && target !== null) { gotoLine(editor, target); }
+    });
+}
+
+/** Move the cursor to `line` and scroll it into view. */
+function gotoLine(editor: vscode.TextEditor, line: number): void {
+    try {
+        const pos = new vscode.Position(Math.max(0, line), 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    } catch (_) { /* the editor was closed mid-run — scrolling is best effort */ }
+}
+
+/** ③ Keep the tail of the growing output block visible while commands stream in. */
+function revealOutputTail(editor: vscode.TextEditor, ctx: RunContext): void {
+    if (!ctx.cfg.followOutput) { return; }
+    try {
+        const line = computePostRunCursorLine(ctx.outputBlockEndLine, editor.document.lineCount);
+        editor.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.Default);
+    } catch (_) { /* the editor was closed mid-run — scrolling is best effort */ }
+}
+
+/** ③ Park the cursor on the first line after the output block once a run is done. */
+function followOutputCursor(editor: vscode.TextEditor, ctx: RunContext): void {
+    if (!ctx.cfg.followOutput || !ctx.outputMarkerRange) { return; }
+    gotoLine(editor, computePostRunCursorLine(ctx.outputBlockEndLine, editor.document.lineCount));
 }
 
 interface RunContext {
@@ -1311,7 +1450,7 @@ async function runLines(lines: string[], ctx: RunContext): Promise<void> {
             ctx.execFlag = true;
             ctx.execCount = passed ? depth + 1 : 0;
             if (!passed) { ctx.assertionFailed = true; }
-            ctx.progress.report({ message: `assert ${passed ? 'pass' : 'FAIL'}` });
+            reportProgress(ctx, `assert ${passed ? 'pass' : 'FAIL'}`);
             ctx.nowLine++;
             continue;
         }
@@ -1409,7 +1548,7 @@ async function handleNumberedAssignment(hit: { idx: string; body: string }, ctx:
         return;
     }
 
-    ctx.progress.report({ message: `setting {${hit.idx}}: ${finalCmd}` });
+    reportProgress(ctx, `setting {${hit.idx}}: ${finalCmd}`);
     const startMs = Date.now();
     const res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token);
     const endMs = Date.now();
@@ -1532,7 +1671,7 @@ async function runOneCommand(rawLine: string, depth: number, ctx: RunContext): P
             ctx.consoles += waitMsg;
             await new Promise(r => setTimeout(r, retryInterval));
         }
-        ctx.progress.report({ message: `${finalCmd}${retryCount > 0 ? ` (try ${attempts + 1})` : ''}` });
+        reportProgress(ctx, `${finalCmd}${retryCount > 0 ? ` (try ${attempts + 1})` : ''}`);
 
         res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token,
             (chunk, isStderr) => {
@@ -1602,7 +1741,7 @@ async function runParallelGroup(rawLines: string[], depth: number, ctx: RunConte
         const sec = checkSecurity(finalCmd, ctx.cfg);
         if (!sec.ok) { return { header, output: `(blocked: ${sec.reason})\n`, ok: false, bindName, bindVal: '', startMs: groupStartMs, endMs: Date.now() }; }
 
-        ctx.progress.report({ message: `[parallel] ${finalCmd}` });
+        reportProgress(ctx, `[parallel] ${finalCmd}`);
         const taskStart = Date.now();
         const res = await execViaTerminal(finalCmd, ctx.cfg, ctx.token,
             (chunk, isStderr) => outputChannel?.append(isStderr ? `[${finalCmd}][stderr] ${chunk}` : `[${finalCmd}] ${chunk}`));
@@ -1719,6 +1858,7 @@ async function syncOutput(editor: vscode.TextEditor, doc: vscode.TextDocument, c
             ctx.outputBlockStartLine = insertPos.line;
             ctx.outputBlockEndLine = insertPos.line + lineCount;
             ctx.outputMarkerRange = true;
+            revealOutputTail(editor, ctx);
         }
     } else {
         const r = new vscode.Range(ctx.outputBlockStartLine, 0, ctx.outputBlockEndLine, 10000);
@@ -1727,6 +1867,7 @@ async function syncOutput(editor: vscode.TextEditor, doc: vscode.TextDocument, c
             ctx.lastRenderedConsoles = ctx.consoles;
             const lineCount = body.split('\n').length - 1;
             ctx.outputBlockEndLine = ctx.outputBlockStartLine + lineCount;
+            revealOutputTail(editor, ctx);
         }
     }
 }
@@ -1740,8 +1881,7 @@ async function runSingleLine(uri: vscode.Uri, line: number, dryRun: boolean): Pr
     if (!editor || editor.document.uri.toString() !== uri.toString()) { await vscode.window.showTextDocument(uri); }
     const newEditor = vscode.window.activeTextEditor;
     if (!newEditor) { return; }
-    const pos = new vscode.Position(line, 0);
-    newEditor.selection = new vscode.Selection(pos, pos);
+    gotoLine(newEditor, line);
     await runFromCursor({ dryRun });
 }
 
@@ -1801,11 +1941,119 @@ class LC4RICodeLensProvider implements vscode.CodeLensProvider {
 // Status bar / profile switcher / clear output
 // =============================================================================
 
+export type Lc4riRunState = 'idle' | 'running' | 'ok' | 'fail' | 'noTarget' | 'cancelled';
+
+export interface StatusBarDetail {
+    profile?: string;
+    message?: string;
+    okCount?: number;
+    failCount?: number;
+    dryRun?: boolean;
+}
+
+export interface StatusBarView {
+    text: string;
+    tooltip: string;
+    background: 'none' | 'warning' | 'error';
+}
+
+export const STATUS_MESSAGE_MAX = 40;
+
+/** Collapse whitespace and cut a command down to status-bar length. */
+export function truncateForStatusBar(s: string, max: number = STATUS_MESSAGE_MAX): string {
+    const flat = s.replace(/\s+/g, ' ').trim();
+    return flat.length <= max ? flat : flat.slice(0, Math.max(0, max - 1)) + '…';
+}
+
+/**
+ * Render the status bar for a run state.  Pure so the wording and the
+ * error/warning highlighting can be unit-tested without a VS Code host.
+ */
+export function buildStatusBarView(state: Lc4riRunState, detail: StatusBarDetail = {}): StatusBarView {
+    const suffix = detail.profile ? ` [${detail.profile}]` : '';
+    const mode = detail.dryRun ? ' (dry-run)' : '';
+    const ok = detail.okCount ?? 0;
+    const fail = detail.failCount ?? 0;
+    const foot = `\nProfile: ${detail.profile || '(none)'}\nClick to switch execution profile.`;
+
+    switch (state) {
+        case 'running':
+            return {
+                text: `$(sync~spin) lc4ri: running${mode}${detail.message ? ` — ${truncateForStatusBar(detail.message)}` : ''}${suffix}`,
+                tooltip: `code-lc4ri: running${mode}${detail.message ? `\n${detail.message}` : ''}${foot}`,
+                background: 'none'
+            };
+        case 'ok':
+            return {
+                text: `$(check) lc4ri: ok (${ok})${suffix}`,
+                tooltip: `code-lc4ri: last run finished — ${ok} command(s) ok.${foot}`,
+                background: 'none'
+            };
+        case 'fail':
+            // A run can fail without any command failing (a failed assertion) —
+            // "(0/0)" would read as nonsense, so drop the counter entirely.
+            return {
+                text: `$(error) lc4ri: FAIL${ok + fail > 0 ? ` (${fail}/${ok + fail})` : ''}${suffix}`,
+                tooltip: `code-lc4ri: last run FAILED — ${ok} ok / ${fail} failed.\nSee the "code-lc4ri" output channel.${foot}`,
+                background: 'error'
+            };
+        case 'noTarget':
+            return {
+                text: `$(warning) lc4ri: nothing to run${suffix}`,
+                tooltip: `code-lc4ri: the last run found no executable line at the cursor.\nPut the cursor on a "- command" line and run again.${foot}`,
+                background: 'warning'
+            };
+        case 'cancelled':
+            return {
+                text: `$(circle-slash) lc4ri: cancelled${suffix}`,
+                tooltip: `code-lc4ri: the last run was cancelled.${foot}`,
+                background: 'none'
+            };
+        case 'idle':
+        default:
+            return {
+                text: `$(circle-outline) lc4ri: idle${suffix}`,
+                tooltip: `code-lc4ri: idle.\nPut the cursor on a "- command" line and run "code-lc4ri: Run from cursor".${foot}`,
+                background: 'none'
+            };
+    }
+}
+
+/** How long a finished-run state stays on the status bar before it falls back to idle. */
+const RESULT_STATE_TTL_MS = 15000;
+
+function setRunState(state: Lc4riRunState, detail: StatusBarDetail = {}): void {
+    runState = state;
+    runStateDetail = detail;
+    const gen = ++runStateGeneration;
+    if (runStateResetTimer !== undefined) { clearTimeout(runStateResetTimer); runStateResetTimer = undefined; }
+    if (state !== 'idle' && state !== 'running') {
+        runStateResetTimer = setTimeout(() => {
+            if (gen === runStateGeneration) {
+                runState = 'idle';
+                runStateDetail = {};
+                updateStatusBar();
+            }
+        }, RESULT_STATE_TTL_MS);
+        (runStateResetTimer as unknown as { unref?: () => void }).unref?.();
+    }
+    updateStatusBar();
+}
+
+/** Report progress to the notification and to the status bar at the same time. */
+function reportProgress(ctx: RunContext, message: string): void {
+    ctx.progress.report({ message });
+    setRunState('running', { message, dryRun: ctx.dryRun });
+}
+
 function updateStatusBar(): void {
     if (!statusBarItem) { return; }
-    const cfg = readConfig();
-    const profileNames = Object.keys(cfg.profiles);
-    statusBarItem.text = activeProfile ? `$(terminal) lc4ri: ${activeProfile}` : (profileNames.length ? '$(terminal) lc4ri: (none)' : '$(terminal) lc4ri');
+    const view = buildStatusBarView(runState, { ...runStateDetail, profile: activeProfile });
+    statusBarItem.text = view.text;
+    statusBarItem.tooltip = view.tooltip;
+    statusBarItem.backgroundColor = view.background === 'none'
+        ? undefined
+        : new vscode.ThemeColor(view.background === 'error' ? 'statusBarItem.errorBackground' : 'statusBarItem.warningBackground');
 }
 
 async function switchProfile(): Promise<void> {

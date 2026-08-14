@@ -2,7 +2,7 @@
     "name": "code-lc4ri",
     "displayName": "code-lc4ri",
     "description": "LC4RI for VS Code — Markdown driven reproducible operations",
-    "version": "1.5.9",
+    "version": "1.6.1",
     "publisher": "yasutakatou",
     "repository": "https://github.com/yasutakatou/code-lc4ri",
     "engines": {
@@ -156,6 +156,11 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Show inline ▶ Run / Dry-run actions on list lines."
+                },
+                "lc4ri.followOutput": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Scroll the editor to the output block while it grows, and park the cursor just after it when the run finishes."
                 }
             }
         }
